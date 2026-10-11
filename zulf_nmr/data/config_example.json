@@ -1,0 +1,57 @@
+{
+  "experiment_name": "ZULF_Thermal_Example",
+  "metadata": {
+    "operator": "DM Technologies",
+    "sample": "13C-Formic Acid",
+    "temperature_C": 25.0,
+    "notes": "Calibration of J-coupling spectra"
+  },
+  "output": {
+    "average_count": 1,
+    "format": "csv",
+    "auto_save": true
+  },
+  "hardware_parameters": {
+    "acq_sample_rate_hz": 1000,
+    "acq_duration_ms": 60000,
+    "acq_start_awg_time": 50
+  },
+  "events": [
+    {
+      "time_ms": 0,
+      "action": ":SHIM:CURRent 1, 10.5"
+    },
+    {
+      "time_ms": 0,
+      "action": ":SHIM:CURRent 2, 0.0"
+    },
+    {
+      "time_ms": 0,
+      "action": ":SHIM:CURRent 3, -2.1"
+    },
+    {
+      "time_ms": 50,
+      "action": ":MOTor:MAGnet"
+    },
+    {
+      "time_ms": 100,
+      "action": ":DIGital:STATe 2, 1"
+    },
+    {
+      "time_ms": 200,
+      "action": ":DIGital:STATe 2, 0"
+    },
+    {
+      "time_ms": 10000,
+      "action": ":MOTor:MEAsure"
+    },
+    {
+      "time_ms": 10400,
+      "action": ":SEQuence:RUN"
+    }
+  ],
+  "awg_sequence": {
+    "type": "npz",
+    "file_path": "sequences/thermal_pulses.npz"
+  }
+}
