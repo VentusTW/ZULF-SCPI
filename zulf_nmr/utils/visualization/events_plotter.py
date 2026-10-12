@@ -9,7 +9,7 @@ from typing import Iterable
 
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
-from matplotlib.figure import Figure
+from matplotlib.figure import Figure, SubFigure
 from matplotlib.lines import Line2D
 
 from zulf_nmr.core.scpi import mnemonic_matches
@@ -54,7 +54,7 @@ def plot_events(
     events: Iterable[Event],
     title: str | None = None,
     ax: Axes | None = None,
-) -> Figure:
+) -> Figure | SubFigure:
     """Draw one row per event (first event on top): a dot at its time, the
     command on the right, coloured by subsystem."""
     events = list(events)
@@ -97,7 +97,8 @@ def plot_events(
     )
     ax.set_title(f"Sequence timeline — {title}" if title else "Sequence timeline",
                  fontweight="bold", pad=28)
-    fig.tight_layout()
+    if isinstance(fig, Figure) and fig.get_layout_engine() is None:
+        fig.tight_layout()  # sub-figures and constrained layouts arrange themselves
     return fig
 
 

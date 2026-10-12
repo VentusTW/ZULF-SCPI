@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from enum import IntEnum
+from pathlib import Path
 from typing import TYPE_CHECKING, Sequence
 
 import numpy as np
@@ -66,6 +68,86 @@ def pack_samples(codes: np.ndarray, enable: np.ndarray | None = None) -> bytes:
     return samples.tobytes()
 
 
+# ASSUMED .npz layout of an AWG sequence file (not defined by the firmware yet):
+#   currents_A      float (N, 4)  channel currents in A, one row per sample
+#   sample_rate_hz  float scalar  DAC sample rate
+#   ranges          int   (4,)    optional, AwgRange per channel (default: HIGH)
+#   enable          int   (N, 4)  optional, 2-bit enable per sample (default: 1)
+
+
+@dataclass(frozen=True)
+class AwgWaveform:
+    """AWG sequence loaded from an .npz file, ready to upload."""
+
+    currents_A: np.ndarray  # (N, 4)
+    sample_rate_hz: float
+    ranges: tuple[AwgRange, ...]
+    enable: np.ndarray | None = None
+    source_path: Path | None = None
+
+    @property
+    def n_samples(self) -> int:
+        return len(self.currents_A)
+
+    @property
+    def duration_s(self) -> float:
+        return self.n_samples / self.sample_rate_hz
+
+    def time_s(self) -> np.ndarray:
+        return np.arange(self.n_samples) / self.sample_rate_hz
+
+    def payload(self) -> bytes:
+        """Packed :AWG:DATA payload (also checks every current against its range)."""
+        return pack_samples(currents_to_codes(self.currents_A, self.ranges), self.enable)
+
+
+def load_awg_npz(
+    path: str | Path,
+    max_sample_rate_hz: float = 10000,
+    max_amplitude_A: float = 1.0,
+) -> AwgWaveform:
+    """Load and validate an AWG sequence .npz file; raise ValueError on any problem."""
+    path = Path(path)
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            arrays = {key: data[key] for key in data.files}
+    except FileNotFoundError:
+        raise ValueError(f"{path}: file not found") from None
+    except Exception as e:
+        raise ValueError(f"{path}: not a valid .npz file ({e})") from None
+
+    missing = {"currents_A", "sample_rate_hz"} - arrays.keys()
+    if missing:
+        raise ValueError(f"{path}: missing array(s) {', '.join(sorted(missing))}")
+    unknown = arrays.keys() - {"currents_A", "sample_rate_hz", "ranges", "enable"}
+    if unknown:
+        raise ValueError(f"{path}: unknown array(s) {', '.join(sorted(unknown))}")
+
+    currents = np.asarray(arrays["currents_A"], dtype=float)
+    if currents.ndim != 2 or currents.shape[1] != N_CHANNELS or len(currents) == 0:
+        raise ValueError(f"{path}: currents_A must have shape (N, {N_CHANNELS}), got {currents.shape}")
+    if not np.isfinite(currents).all():
+        raise ValueError(f"{path}: currents_A contains NaN or infinite values")
+    if np.abs(currents).max() > max_amplitude_A:
+        raise ValueError(f"{path}: AWG amplitude exceeds the limit of +/-{max_amplitude_A} A")
+
+    rate = float(arrays["sample_rate_hz"])
+    if not 0 < rate <= max_sample_rate_hz:
+        raise ValueError(f"{path}: sample_rate_hz must be in (0, {max_sample_rate_hz}], got {rate:g}")
+
+    try:
+        raw_ranges = arrays.get("ranges", np.full(N_CHANNELS, AwgRange.HIGH))
+        ranges = tuple(AwgRange(int(r)) for r in np.ravel(raw_ranges))
+    except ValueError:
+        raise ValueError(f"{path}: ranges must contain only 0 (LOW) or 1 (HIGH)") from None
+    if len(ranges) != N_CHANNELS:
+        raise ValueError(f"{path}: ranges must have {N_CHANNELS} values, got {len(ranges)}")
+
+    waveform = AwgWaveform(currents, rate, ranges, arrays.get("enable"), source_path=path)
+    waveform.payload()  # range and enable checks
+    return waveform
+
+
 class Awg:
     """:AWG subsystem - 4-channel arbitrary waveform generator.
 
@@ -104,6 +186,16 @@ class Awg:
         if np.abs(np.asarray(currents_A, dtype=float)).max(initial=0) > self.max_amplitude_A:
             raise ValueError(f"AWG amplitude exceeds the limit of +/-{self.max_amplitude_A} A")
         self.load_data(pack_samples(currents_to_codes(currents_A, ranges), enable))
+
+    def upload(self, waveform: AwgWaveform) -> None:
+        """Send the sample rate, the range of every channel and the data of a loaded sequence."""
+        if np.abs(waveform.currents_A).max(initial=0) > self.max_amplitude_A:
+            raise ValueError(f"AWG amplitude exceeds the limit of +/-{self.max_amplitude_A} A")
+        payload = waveform.payload()
+        self.set_sample_rate(waveform.sample_rate_hz)
+        for channel, range_ in zip(self.CHANNELS, waveform.ranges):
+            self.set_range(channel, range_)
+        self.load_data(payload)
 
     # ---------------------------------------------------------------- clock
 

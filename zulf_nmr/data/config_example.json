@@ -31,7 +31,7 @@
     },
     {
       "time_ms": 50,
-      "action": ":MOTor:MAGnet"
+      "action": ":MOTor:MOVE MAGNET"
     },
     {
       "time_ms": 100,
@@ -43,11 +43,11 @@
     },
     {
       "time_ms": 10000,
-      "action": ":MOTor:MEAsure"
+      "action": ":MOTor:MOVE MEASURE"
     },
     {
       "time_ms": 10400,
-      "action": ":SEQuence:RUN"
+      "action": ":AWG:RUN"
     }
   ],
   "awg_sequence": {

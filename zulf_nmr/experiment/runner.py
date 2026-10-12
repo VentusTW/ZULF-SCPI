@@ -16,6 +16,7 @@ import numpy as np
 from zulf_nmr.core.spectrometer import Spectrometer
 from zulf_nmr.experiment.parser import ExperimentConfig
 from zulf_nmr.experiment.sequence import CompiledSequence, compile_experiment
+from zulf_nmr.hardware.awg import AwgWaveform
 
 log = logging.getLogger(__name__)
 
@@ -40,7 +41,8 @@ class ExperimentRunner:
     """Uploads the compiled sequence, starts it and collects the ADC data.
 
     One run = output.average_count transients. Every transient is saved as it
-    arrives and the average file is rewritten after each one.
+    arrives and the average file is rewritten after each one. An AWG waveform,
+    if given, is uploaded once before the first transient.
     """
 
     def __init__(
@@ -53,6 +55,7 @@ class ExperimentRunner:
         poll_s: float = 0.05,
         timeout_margin_s: float = 30.0,
         on_progress: Callable[[int, int, int], None] | None = None,
+        awg_waveform: AwgWaveform | None = None,
     ) -> None:
         """on_progress(transient, points_received, points_expected) is called after every chunk."""
         self.spec = spectrometer
@@ -63,6 +66,7 @@ class ExperimentRunner:
         self.poll_s = poll_s
         self.timeout_margin_s = timeout_margin_s
         self.on_progress = on_progress
+        self.awg_waveform = awg_waveform
         self.sequence: CompiledSequence = compile_experiment(config)
         self._abort = threading.Event()
 
@@ -88,6 +92,9 @@ class ExperimentRunner:
 
         n = self.config.output.average_count
         try:
+            if self.awg_waveform is not None:
+                log.info("Uploading AWG sequence (%d samples)", self.awg_waveform.n_samples)
+                self.spec.awg.upload(self.awg_waveform)
             for i in range(1, n + 1):
                 log.info("Transient %d/%d", i, n)
                 data = self._run_transient(i)

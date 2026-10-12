@@ -1,42 +1,64 @@
-"""Main window: connection indicator, SCPI command console, configuration loading."""
+"""Main window: connection indicator, SCPI console, configuration loading and experiment run."""
 
 from __future__ import annotations
 
+import json
 import logging
 import queue
 import threading
 import tkinter as tk
+from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, ttk
 from tkinter.scrolledtext import ScrolledText
 
+from matplotlib.figure import Figure
 from serial.tools import list_ports
 
 from zulf_nmr.core.connection import DEFAULT_SYSTEM_CONFIG, Message, SCPIConnection
-from zulf_nmr.experiment.parser import ConfigError, ConnectionSettings, load_system_config
+from zulf_nmr.core.spectrometer import Spectrometer
+from zulf_nmr.experiment.parser import (
+    ConfigError,
+    ConnectionSettings,
+    ExperimentConfig,
+    HardwareLimits,
+    SystemConfig,
+    load_experiment_config,
+    load_system_config,
+)
+from zulf_nmr.experiment.runner import ExperimentAborted, ExperimentRunner
+from zulf_nmr.gui.preview import PlotPreview
+from zulf_nmr.hardware.awg import AwgWaveform, load_awg_npz
+from zulf_nmr.utils.visualization.awg_plotter import plot_awg
+from zulf_nmr.utils.visualization.events_plotter import plot_events
 
 log = logging.getLogger(__name__)
 
 # Used when system.json is missing or invalid.
-DEFAULT_CONNECTION = ConnectionSettings(port="COM3", baudrate=115200, timeout_s=2.0)
+DEFAULT_SYSTEM = SystemConfig(
+    connection=ConnectionSettings(port="COM3", baudrate=115200, timeout_s=2.0),
+    hardware_limits=HardwareLimits(),
+    data_output=Path("data/"),
+)
 
 _STATUS_POLL_MS = 500
 _LOG_POLL_MS = 100
+_MAX_LOG_LINE = 300  # longer console lines (e.g. echoed binary data) are cut
 _COLOR_OK = "#2e9e44"
 _COLOR_FAIL = "#d0342c"
 
 
-def load_connection_settings(path: Path = DEFAULT_SYSTEM_CONFIG) -> tuple[ConnectionSettings, str]:
-    """Read connection settings from system.json, falling back to DEFAULT_CONNECTION.
+def load_system_settings(path: Path = DEFAULT_SYSTEM_CONFIG) -> tuple[SystemConfig, str]:
+    """Read system.json, falling back to DEFAULT_SYSTEM.
 
     Returns the settings and a message describing where they came from.
     """
     try:
-        return load_system_config(path).connection, f"Loaded connection settings from {path}"
+        return load_system_config(path), f"Loaded connection settings from {path}"
     except ConfigError as e:
         reason = "; ".join(e.errors)
-        return DEFAULT_CONNECTION, f"No valid {path} ({reason}) - using default values"
+        return DEFAULT_SYSTEM, f"No valid {path} ({reason}) - using default values"
 
 
 class App(tk.Tk):
@@ -52,12 +74,17 @@ class App(tk.Tk):
         self._connection: SCPIConnection | None = None
         self._last_connected: bool | None = None
 
-        settings, source = load_connection_settings()
-        self._settings = settings
+        # Experiment and AWG sequence accepted by the user, ready to run.
+        self._experiment: ExperimentConfig | None = None
+        self._awg: AwgWaveform | None = None
+        self._runner: ExperimentRunner | None = None
+
+        self._system, source = load_system_settings()
+        self._settings = self._system.connection
 
         self._build_ui()
         self._log("info", source)
-        self._apply_settings_to_fields(settings)
+        self._apply_settings_to_fields(self._settings)
         self._connect()
 
         self.after(_STATUS_POLL_MS, self._poll_status)
@@ -89,6 +116,15 @@ class App(tk.Tk):
         ttk.Button(top, text="Load config", command=self._load_config_file).pack(
             side="right"
         )
+
+        run_bar = ttk.Frame(self, padding=(8, 0, 8, 8))
+        run_bar.pack(fill="x")
+        self._experiment_label = ttk.Label(run_bar, text="Experiment: none loaded")
+        self._experiment_label.pack(side="left")
+        self._run_btn = ttk.Button(run_bar, text="Run", command=self._toggle_run, state="disabled")
+        self._run_btn.pack(side="right")
+        self._progress_label = ttk.Label(run_bar, text="")
+        self._progress_label.pack(side="right", padx=8)
 
         self._console = ScrolledText(self, state="disabled", font=("Consolas", 10), wrap="word")
         self._console.pack(fill="both", expand=True, padx=8)
@@ -124,6 +160,7 @@ class App(tk.Tk):
         self._status_icon.itemconfig(self._status_dot, fill=_COLOR_OK if connected else _COLOR_FAIL)
         self._status_label.config(text="Connected" if connected else "Disconnected")
         self._connect_btn.config(text="Disconnect" if connected else "Connect")
+        self._update_run_button()
 
     # ------------------------------------------------------------ connection
 
@@ -233,30 +270,155 @@ class App(tk.Tk):
     # --------------------------------------------------------- configuration
 
     def _load_config_file(self) -> None:
-        """Load connection settings from a system.json-style file and connect at once."""
+        """Load a system file (connect at once) or an experiment file (preview, then accept)."""
         path = filedialog.askopenfilename(
             title="Select configuration file",
-            initialdir=DEFAULT_SYSTEM_CONFIG.parent,
+            initialdir=DEFAULT_SYSTEM_CONFIG.parent.parent,
             filetypes=[("JSON", "*.json"), ("All files", "*.*")],
         )
         if not path:
             return
         path = Path(path)
         try:
-            settings = load_system_config(path).connection
-        except ConfigError as e:
-            self._log("error", f"{path.name} contains errors:")
-            for message in e.errors:
-                self._log("error", f"   - {message}")
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            self._log("error", f"Cannot read {path.name}: {e}")
             return
+
+        if isinstance(data, dict) and "connection" in data:
+            self._load_system_file(path)
+        elif isinstance(data, dict) and "events" in data:
+            self._load_experiment_file(path)
+        else:
+            self._log("error", f"{path.name}: unknown file - expected a 'connection' section "
+                               "(system file) or 'events' (experiment file)")
+
+    def _load_system_file(self, path: Path) -> None:
+        try:
+            system = load_system_config(path)
+        except ConfigError as e:
+            self._log_config_error(path, e)
+            return
+        settings = system.connection
         self._log("info", f"Loaded connection settings from {path.name}: {settings.port}, {settings.baudrate} baud")
+        self._system = system
         self._settings = settings
         self._apply_settings_to_fields(settings)
         self._connect()
 
+    def _load_experiment_file(self, path: Path) -> None:
+        """Validate the experiment and its AWG sequence, then show both for acceptance."""
+        if self._runner is not None:
+            self._log("error", "An experiment is running - abort it before loading another one")
+            return
+        self._set_experiment(None, None)
+        limits = self._system.hardware_limits
+        try:
+            config = load_experiment_config(path, limits=limits)
+            awg = None
+            if config.awg_sequence is not None:
+                awg = load_awg_npz(
+                    config.awg_sequence.file_path,
+                    max_sample_rate_hz=limits.max_awg_sample_rate_hz,
+                    max_amplitude_A=limits.max_awg_amplitude_A,
+                )
+        except ConfigError as e:
+            self._log_config_error(path, e)
+            return
+        except ValueError as e:
+            self._log("error", f"AWG sequence: {e}")
+            return
+        self._log("info", f"Loaded experiment {config.experiment_name!r} from {path.name} "
+                          f"({len(config.events)} events)")
+
+        # Event timeline on top, AWG channels below, so both are checked together.
+        events_height = max(4.0, 0.45 * len(config.events) + 2)
+        if awg is None:
+            fig = Figure(figsize=(10, events_height), layout="constrained")
+            plot_events(config.events, title=config.experiment_name, ax=fig.add_subplot())
+            hint = "Check the event timeline. Press OK to enable Run."
+        else:
+            fig = Figure(figsize=(10, events_height + 6), layout="constrained")
+            top, bottom = fig.subfigures(2, 1, height_ratios=[events_height, 6])
+            plot_events(config.events, title=config.experiment_name, ax=top.add_subplot())
+            plot_awg(awg, fig=bottom)
+            hint = "Check the event timeline and the AWG waveforms. Press OK to enable Run."
+        if not PlotPreview(self, "Experiment configuration", fig, hint).ask():
+            self._log("info", "Experiment configuration rejected")
+            return
+        accepted = "Experiment configuration"
+        accepted += f" and AWG sequence {awg.source_path.name}" if awg is not None else ""
+        self._log("info", f"{accepted} accepted")
+
+        self._set_experiment(config, awg)
+        self._log("info", "Ready - press Run to start the experiment")
+
+    def _log_config_error(self, path: Path, error: ConfigError) -> None:
+        self._log("error", f"{path.name} contains errors:")
+        for message in error.errors:
+            self._log("error", f"   - {message}")
+
+    def _set_experiment(self, config: ExperimentConfig | None, awg: AwgWaveform | None) -> None:
+        self._experiment, self._awg = config, awg
+        if config is None:
+            text = "Experiment: none loaded"
+        else:
+            text = f"Experiment: {config.experiment_name} (accepted"
+            text += f", AWG: {awg.source_path.name})" if awg is not None else ", no AWG sequence)"
+        self._experiment_label.config(text=text)
+        self._update_run_button()
+
+    # ------------------------------------------------------------------- run
+
+    def _update_run_button(self) -> None:
+        if self._runner is not None:
+            self._run_btn.config(text="Abort", state="normal")
+        else:
+            ready = self._experiment is not None and self._is_connected()
+            self._run_btn.config(text="Run", state="normal" if ready else "disabled")
+
+    def _toggle_run(self) -> None:
+        if self._runner is not None:
+            self._runner.abort()
+            self._log("info", "Aborting...")
+            return
+        if self._experiment is None or not self._is_connected():
+            return
+        spec = Spectrometer(
+            self._connection,
+            hardware_limits=asdict(self._system.hardware_limits),
+            data_output=self._system.data_output,
+        )
+        self._runner = ExperimentRunner(
+            spec, self._experiment, awg_waveform=self._awg, on_progress=self._on_progress
+        )
+        self._log("info", f"Starting experiment {self._experiment.experiment_name!r}")
+        self._update_run_button()
+        threading.Thread(target=self._run_worker, args=(self._runner,), name="Experiment", daemon=True).start()
+
+    def _run_worker(self, runner: ExperimentRunner) -> None:
+        try:
+            result = runner.run()
+        except ExperimentAborted:
+            self._incoming.put(("error", "Experiment aborted - *RST sent"))
+        except Exception as e:
+            self._incoming.put(("error", f"Experiment failed: {e}"))
+        else:
+            self._incoming.put(("info", f"Experiment finished ({len(result.transients)} transient(s))"))
+            for path in result.files:
+                self._incoming.put(("info", f"   saved {path}"))
+        self._incoming.put(("finished", ""))
+
+    def _on_progress(self, transient: int, received: int, expected: int) -> None:
+        total = self._experiment.output.average_count if self._experiment else 1
+        self._incoming.put(("progress", f"Transient {transient}/{total}: {received}/{expected} points"))
+
     # ------------------------------------------------------------------- log
 
     def _log(self, tag: str, text: str) -> None:
+        if len(text) > _MAX_LOG_LINE:
+            text = text[:_MAX_LOG_LINE] + f"... ({len(text)} characters)"
         stamp = datetime.now().strftime("%H:%M:%S")
         self._console.config(state="normal")
         self._console.insert("end", f"[{stamp}] {text}\n", tag)
@@ -269,10 +431,19 @@ class App(tk.Tk):
                 tag, text = self._incoming.get_nowait()
             except queue.Empty:
                 break
-            self._log(tag, text)
+            if tag == "progress":
+                self._progress_label.config(text=text)
+            elif tag == "finished":
+                self._runner = None
+                self._progress_label.config(text="")
+                self._update_run_button()
+            else:
+                self._log(tag, text)
         self.after(_LOG_POLL_MS, self._drain_log)
 
     def _on_close(self) -> None:
+        if self._runner is not None:
+            self._runner.abort()
         self._disconnect(quiet=True)
         self.destroy()
 
