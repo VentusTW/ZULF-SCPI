@@ -116,6 +116,10 @@ class App(tk.Tk):
         ttk.Label(top, text="Baud:").pack(side="left")
         self._baud = ttk.Entry(top, width=8)
         self._baud.pack(side="left", padx=(4, 8))
+        # Choosing a port (or Enter in either field) connects at once.
+        self._port.bind("<<ComboboxSelected>>", lambda _e: self._connect())
+        self._port.bind("<Return>", lambda _e: self._connect())
+        self._baud.bind("<Return>", lambda _e: self._connect())
 
         self._connect_btn = ttk.Button(top, text="Connect", command=self._toggle_connection)
         self._connect_btn.pack(side="left")
