@@ -1,8 +1,7 @@
-"""Main window: connection indicator, SCPI console, configuration loading and experiment run."""
+"""Main window: connection indicator, SCPI console, experiment queue and its run."""
 
 from __future__ import annotations
 
-import json
 import logging
 import queue
 import threading
@@ -21,15 +20,14 @@ from zulf_nmr.core.spectrometer import Spectrometer
 from zulf_nmr.experiment.parser import (
     ConfigError,
     ConnectionSettings,
-    ExperimentConfig,
     HardwareLimits,
     SystemConfig,
-    load_experiment_config,
     load_system_config,
 )
-from zulf_nmr.experiment.runner import ExperimentAborted, ExperimentRunner
+from zulf_nmr.experiment.runner import ExperimentAborted
+from zulf_nmr.experiment.schedule import QueueItem, QueueRunner, format_delay
 from zulf_nmr.gui.preview import PlotPreview
-from zulf_nmr.hardware.awg import AwgWaveform, load_awg_npz
+from zulf_nmr.gui.queue_editor import QueueEditor
 from zulf_nmr.utils.visualization.awg_plotter import plot_awg
 from zulf_nmr.utils.visualization.events_plotter import plot_events
 
@@ -74,10 +72,10 @@ class App(tk.Tk):
         self._connection: SCPIConnection | None = None
         self._last_connected: bool | None = None
 
-        # Experiment and AWG sequence accepted by the user, ready to run.
-        self._experiment: ExperimentConfig | None = None
-        self._awg: AwgWaveform | None = None
-        self._runner: ExperimentRunner | None = None
+        # Queue of experiment sets; Run is possible once the user accepted every set.
+        self._queue: list[QueueItem] = []
+        self._queue_accepted = False
+        self._runner: QueueRunner | None = None
 
         self._system, source = load_system_settings()
         self._settings = self._system.connection
@@ -116,10 +114,13 @@ class App(tk.Tk):
         ttk.Button(top, text="Load config", command=self._load_config_file).pack(
             side="right"
         )
+        ttk.Button(top, text="Load connection", command=self._load_connection_file).pack(
+            side="right", padx=(0, 6)
+        )
 
         run_bar = ttk.Frame(self, padding=(8, 0, 8, 8))
         run_bar.pack(fill="x")
-        self._experiment_label = ttk.Label(run_bar, text="Experiment: none loaded")
+        self._experiment_label = ttk.Label(run_bar, text="Queue: empty")
         self._experiment_label.pack(side="left")
         self._run_btn = ttk.Button(run_bar, text="Run", command=self._toggle_run, state="disabled")
         self._run_btn.pack(side="right")
@@ -269,103 +270,81 @@ class App(tk.Tk):
 
     # --------------------------------------------------------- configuration
 
-    def _load_config_file(self) -> None:
-        """Load a system file (connect at once) or an experiment file (preview, then accept)."""
+    def _load_connection_file(self) -> None:
+        """Load connection settings from a system.json-style file and connect at once."""
         path = filedialog.askopenfilename(
-            title="Select configuration file",
-            initialdir=DEFAULT_SYSTEM_CONFIG.parent.parent,
+            title="Select connection file",
+            initialdir=DEFAULT_SYSTEM_CONFIG.parent,
             filetypes=[("JSON", "*.json"), ("All files", "*.*")],
         )
         if not path:
             return
         path = Path(path)
         try:
-            with open(path, encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError) as e:
-            self._log("error", f"Cannot read {path.name}: {e}")
-            return
-
-        if isinstance(data, dict) and "connection" in data:
-            self._load_system_file(path)
-        elif isinstance(data, dict) and "events" in data:
-            self._load_experiment_file(path)
-        else:
-            self._log("error", f"{path.name}: unknown file - expected a 'connection' section "
-                               "(system file) or 'events' (experiment file)")
-
-    def _load_system_file(self, path: Path) -> None:
-        try:
             system = load_system_config(path)
         except ConfigError as e:
-            self._log_config_error(path, e)
+            self._log("error", f"{path.name} contains errors:")
+            for message in e.errors:
+                self._log("error", f"   - {message}")
             return
         settings = system.connection
         self._log("info", f"Loaded connection settings from {path.name}: {settings.port}, {settings.baudrate} baud")
+        if system.hardware_limits != self._system.hardware_limits and self._queue_accepted:
+            # The queue was validated against the old limits.
+            self._set_queue(self._queue, accepted=False)
+            self._log("info", "Hardware limits changed - load and accept the queue again")
         self._system = system
         self._settings = settings
         self._apply_settings_to_fields(settings)
         self._connect()
 
-    def _load_experiment_file(self, path: Path) -> None:
-        """Validate the experiment and its AWG sequence, then show both for acceptance."""
+    def _load_config_file(self) -> None:
+        """Edit the queue of experiment sets, then review and accept every set."""
         if self._runner is not None:
-            self._log("error", "An experiment is running - abort it before loading another one")
+            self._log("error", "The queue is running - abort it before changing it")
             return
-        self._set_experiment(None, None)
-        limits = self._system.hardware_limits
-        try:
-            config = load_experiment_config(path, limits=limits)
-            awg = None
-            if config.awg_sequence is not None:
-                awg = load_awg_npz(
-                    config.awg_sequence.file_path,
-                    max_sample_rate_hz=limits.max_awg_sample_rate_hz,
-                    max_amplitude_A=limits.max_awg_amplitude_A,
-                )
-        except ConfigError as e:
-            self._log_config_error(path, e)
+        editor = QueueEditor(self, self._queue, self._system.hardware_limits,
+                             initial_dir=DEFAULT_SYSTEM_CONFIG.parent.parent / "data")
+        items = editor.ask()
+        if items is None:
             return
-        except ValueError as e:
-            self._log("error", f"AWG sequence: {e}")
-            return
-        self._log("info", f"Loaded experiment {config.experiment_name!r} from {path.name} "
-                          f"({len(config.events)} events)")
+        self._set_queue(items, accepted=False)
+        n = len(items)
+        self._log("info", f"Queue with {n} set(s) loaded - review every set")
+        for index, item in enumerate(items, start=1):
+            if not self._review(item, index, n):
+                self._log("info", f"Set {index}/{n} ({item.path.name}) rejected - the queue is not accepted")
+                return
+            self._log("info", f"Set {index}/{n} ({item.path.name}) accepted")
+        self._set_queue(items, accepted=True)
+        self._log("info", "All sets accepted - press Run to start the queue")
 
-        # Event timeline on top, AWG channels below, so both are checked together.
+    def _review(self, item: QueueItem, index: int, total: int) -> bool:
+        """Show the event timeline (and the AWG channels below it) of one set; True if accepted."""
+        config, awg = item.config, item.awg
         events_height = max(4.0, 0.45 * len(config.events) + 2)
         if awg is None:
             fig = Figure(figsize=(10, events_height), layout="constrained")
             plot_events(config.events, title=config.experiment_name, ax=fig.add_subplot())
-            hint = "Check the event timeline. Press OK to enable Run."
         else:
             fig = Figure(figsize=(10, events_height + 6), layout="constrained")
             top, bottom = fig.subfigures(2, 1, height_ratios=[events_height, 6])
             plot_events(config.events, title=config.experiment_name, ax=top.add_subplot())
             plot_awg(awg, fig=bottom)
-            hint = "Check the event timeline and the AWG waveforms. Press OK to enable Run."
-        if not PlotPreview(self, "Experiment configuration", fig, hint).ask():
-            self._log("info", "Experiment configuration rejected")
-            return
-        accepted = "Experiment configuration"
-        accepted += f" and AWG sequence {awg.source_path.name}" if awg is not None else ""
-        self._log("info", f"{accepted} accepted")
-
-        self._set_experiment(config, awg)
-        self._log("info", "Ready - press Run to start the experiment")
-
-    def _log_config_error(self, path: Path, error: ConfigError) -> None:
-        self._log("error", f"{path.name} contains errors:")
-        for message in error.errors:
-            self._log("error", f"   - {message}")
-
-    def _set_experiment(self, config: ExperimentConfig | None, awg: AwgWaveform | None) -> None:
-        self._experiment, self._awg = config, awg
-        if config is None:
-            text = "Experiment: none loaded"
+        if index < total:
+            hint = f"Set {index}/{total}. Next set starts {format_delay(item.delay_s)} after this one ends."
         else:
-            text = f"Experiment: {config.experiment_name} (accepted"
-            text += f", AWG: {awg.source_path.name})" if awg is not None else ", no AWG sequence)"
+            hint = f"Set {index}/{total} (last)."
+        hint += " Press OK to accept."
+        return PlotPreview(self, f"Set {index}/{total}: {item.path.name}", fig, hint).ask()
+
+    def _set_queue(self, items: list[QueueItem], accepted: bool) -> None:
+        self._queue, self._queue_accepted = items, accepted
+        if not items:
+            text = "Queue: empty"
+        else:
+            names = ", ".join(item.path.stem for item in items[:3]) + (", …" if len(items) > 3 else "")
+            text = f"Queue: {len(items)} set(s) [{names}] - {'accepted' if accepted else 'not accepted'}"
         self._experiment_label.config(text=text)
         self._update_run_button()
 
@@ -375,7 +354,7 @@ class App(tk.Tk):
         if self._runner is not None:
             self._run_btn.config(text="Abort", state="normal")
         else:
-            ready = self._experiment is not None and self._is_connected()
+            ready = self._queue_accepted and self._is_connected()
             self._run_btn.config(text="Run", state="normal" if ready else "disabled")
 
     def _toggle_run(self) -> None:
@@ -383,36 +362,45 @@ class App(tk.Tk):
             self._runner.abort()
             self._log("info", "Aborting...")
             return
-        if self._experiment is None or not self._is_connected():
+        if not self._queue_accepted or not self._is_connected():
             return
         spec = Spectrometer(
             self._connection,
             hardware_limits=asdict(self._system.hardware_limits),
             data_output=self._system.data_output,
         )
-        self._runner = ExperimentRunner(
-            spec, self._experiment, awg_waveform=self._awg, on_progress=self._on_progress
-        )
-        self._log("info", f"Starting experiment {self._experiment.experiment_name!r}")
-        self._update_run_button()
-        threading.Thread(target=self._run_worker, args=(self._runner,), name="Experiment", daemon=True).start()
-
-    def _run_worker(self, runner: ExperimentRunner) -> None:
         try:
-            result = runner.run()
+            self._runner = QueueRunner(
+                spec, self._queue,
+                on_status=lambda text: self._incoming.put(("status", text)),
+                on_progress=self._on_progress,
+            )
+        except ValueError as e:
+            self._log("error", f"Cannot start the queue: {e}")
+            return
+        self._log("info", f"Starting the queue ({len(self._queue)} set(s))")
+        self._update_run_button()
+        threading.Thread(target=self._run_worker, args=(self._runner,), name="Queue", daemon=True).start()
+
+    def _run_worker(self, runner: QueueRunner) -> None:
+        try:
+            results = runner.run()
         except ExperimentAborted:
-            self._incoming.put(("error", "Experiment aborted - *RST sent"))
+            self._incoming.put(("error", "Queue aborted - *RST sent"))
         except Exception as e:
-            self._incoming.put(("error", f"Experiment failed: {e}"))
+            self._incoming.put(("error", f"Queue failed: {e}"))
         else:
-            self._incoming.put(("info", f"Experiment finished ({len(result.transients)} transient(s))"))
-            for path in result.files:
-                self._incoming.put(("info", f"   saved {path}"))
+            self._incoming.put(("info", f"Queue finished ({len(results)} set(s))"))
+            for index, result in enumerate(results, start=1):
+                for path in result.files:
+                    self._incoming.put(("info", f"   set {index}: saved {path}"))
         self._incoming.put(("finished", ""))
 
-    def _on_progress(self, transient: int, received: int, expected: int) -> None:
-        total = self._experiment.output.average_count if self._experiment else 1
-        self._incoming.put(("progress", f"Transient {transient}/{total}: {received}/{expected} points"))
+    def _on_progress(self, set_index: int, transient: int, received: int, expected: int) -> None:
+        item = self._queue[set_index - 1]
+        total = item.config.output.average_count
+        self._incoming.put(("progress", f"Set {set_index}/{len(self._queue)}, transient {transient}/{total}: "
+                                        f"{received}/{expected} points"))
 
     # ------------------------------------------------------------------- log
 
@@ -433,6 +421,9 @@ class App(tk.Tk):
                 break
             if tag == "progress":
                 self._progress_label.config(text=text)
+            elif tag == "status":
+                self._progress_label.config(text=text)
+                self._log("info", text)
             elif tag == "finished":
                 self._runner = None
                 self._progress_label.config(text="")
