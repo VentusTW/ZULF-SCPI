@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import queue
+import sys
 import threading
 from pathlib import Path
 from typing import Callable, Union
@@ -13,7 +14,13 @@ import serial
 
 log = logging.getLogger(__name__)
 
-DEFAULT_SYSTEM_CONFIG = Path(__file__).resolve().parent.parent / "config" / "system.json"
+# Folder holding config/ and data/: the package folder, or - in a PyInstaller
+# executable, whose own files are unpacked to a temporary folder - the folder of the .exe.
+APP_DIR = (
+    Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
+    else Path(__file__).resolve().parent.parent
+)
+DEFAULT_SYSTEM_CONFIG = APP_DIR / "config" / "system.json"
 
 # A message received from the device: a text line (str) or an
 # IEEE 488.2 definite-length binary block #<hdr><bin> (bytes, payload only).

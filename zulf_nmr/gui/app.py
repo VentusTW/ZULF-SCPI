@@ -15,7 +15,7 @@ from tkinter.scrolledtext import ScrolledText
 from matplotlib.figure import Figure
 from serial.tools import list_ports
 
-from zulf_nmr.core.connection import DEFAULT_SYSTEM_CONFIG, Message, SCPIConnection
+from zulf_nmr.core.connection import APP_DIR, DEFAULT_SYSTEM_CONFIG, Message, SCPIConnection
 from zulf_nmr.core.spectrometer import Spectrometer
 from zulf_nmr.experiment.parser import (
     ConfigError,
@@ -40,10 +40,6 @@ DEFAULT_SYSTEM = SystemConfig(
     hardware_limits=HardwareLimits(),
     data_output=Path("data/results/"),
 )
-
-# Relative data_output paths in system.json are relative to the package
-# folder, next to config/ and data/.
-PACKAGE_DIR = DEFAULT_SYSTEM_CONFIG.parent.parent
 
 _STATUS_POLL_MS = 500
 _LOG_POLL_MS = 100
@@ -429,7 +425,8 @@ class App(tk.Tk):
 
     def _results_dir(self) -> Path:
         path = self._system.data_output
-        return path if path.is_absolute() else PACKAGE_DIR / path
+        # Relative paths are relative to APP_DIR, next to config/ and data/.
+        return path if path.is_absolute() else APP_DIR / path
 
     def _ensure_results_dir(self) -> Path:
         """Create the results folder (and its parents, e.g. data/) if it does not exist."""
