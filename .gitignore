@@ -6,4 +6,4 @@ build/
 dist/
 *.egg-info/
 archive/
-measurements/
+zulf_nmr/data/results/

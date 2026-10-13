@@ -28,6 +28,7 @@ from zulf_nmr.experiment.runner import ExperimentAborted
 from zulf_nmr.experiment.schedule import QueueItem, QueueRunner, format_delay
 from zulf_nmr.gui.preview import PlotPreview
 from zulf_nmr.gui.queue_editor import QueueEditor
+from zulf_nmr.gui.results_viewer import ResultsViewer
 from zulf_nmr.utils.visualization.awg_plotter import plot_awg
 from zulf_nmr.utils.visualization.events_plotter import plot_events
 
@@ -37,8 +38,12 @@ log = logging.getLogger(__name__)
 DEFAULT_SYSTEM = SystemConfig(
     connection=ConnectionSettings(port="COM3", baudrate=115200, timeout_s=2.0),
     hardware_limits=HardwareLimits(),
-    data_output=Path("data/"),
+    data_output=Path("data/results/"),
 )
+
+# Relative data_output paths in system.json are relative to the package
+# folder, next to config/ and data/.
+PACKAGE_DIR = DEFAULT_SYSTEM_CONFIG.parent.parent
 
 _STATUS_POLL_MS = 500
 _LOG_POLL_MS = 100
@@ -83,6 +88,10 @@ class App(tk.Tk):
         self._build_ui()
         self._log("info", source)
         self._apply_settings_to_fields(self._settings)
+        try:
+            self._ensure_results_dir()
+        except OSError:
+            pass  # already logged; checked again before every run
         self._connect()
 
         self.after(_STATUS_POLL_MS, self._poll_status)
@@ -123,6 +132,10 @@ class App(tk.Tk):
         self._experiment_label = ttk.Label(run_bar, text="Queue: empty")
         self._experiment_label.pack(side="left")
         self._run_btn = ttk.Button(run_bar, text="Run", command=self._toggle_run, state="disabled")
+        # Until the device is available the results are simulated.
+        self._simulate = tk.BooleanVar(value=True)
+        ttk.Checkbutton(run_bar, text="Simulation", variable=self._simulate,
+                        command=self._update_run_button).pack(side="right", padx=(0, 8))
         self._run_btn.pack(side="right")
         self._progress_label = ttk.Label(run_bar, text="")
         self._progress_label.pack(side="right", padx=8)
@@ -354,7 +367,7 @@ class App(tk.Tk):
         if self._runner is not None:
             self._run_btn.config(text="Abort", state="normal")
         else:
-            ready = self._queue_accepted and self._is_connected()
+            ready = self._queue_accepted and (self._simulate.get() or self._is_connected())
             self._run_btn.config(text="Run", state="normal" if ready else "disabled")
 
     def _toggle_run(self) -> None:
@@ -362,38 +375,44 @@ class App(tk.Tk):
             self._runner.abort()
             self._log("info", "Aborting...")
             return
-        if not self._queue_accepted or not self._is_connected():
+        simulate = self._simulate.get()
+        if not self._queue_accepted or not (simulate or self._is_connected()):
             return
-        spec = Spectrometer(
-            self._connection,
-            hardware_limits=asdict(self._system.hardware_limits),
-            data_output=self._system.data_output,
-        )
+        spec = None
+        if not simulate:
+            spec = Spectrometer(
+                self._connection,
+                hardware_limits=asdict(self._system.hardware_limits),
+                data_output=self._results_dir(),
+            )
         try:
             self._runner = QueueRunner(
-                spec, self._queue,
+                spec, self._queue, self._ensure_results_dir(), simulate=simulate,
                 on_status=lambda text: self._incoming.put(("status", text)),
                 on_progress=self._on_progress,
             )
-        except ValueError as e:
+        except (ValueError, OSError) as e:
             self._log("error", f"Cannot start the queue: {e}")
             return
-        self._log("info", f"Starting the queue ({len(self._queue)} set(s))")
+        mode = " - SIMULATION" if simulate else ""
+        self._log("info", f"Starting the queue ({len(self._queue)} set(s)){mode}")
         self._update_run_button()
         threading.Thread(target=self._run_worker, args=(self._runner,), name="Queue", daemon=True).start()
 
     def _run_worker(self, runner: QueueRunner) -> None:
         try:
-            results = runner.run()
+            runner.run()
         except ExperimentAborted:
-            self._incoming.put(("error", "Queue aborted - *RST sent"))
+            self._incoming.put(("error", "Queue aborted" + ("" if runner.simulate else " - *RST sent")))
         except Exception as e:
             self._incoming.put(("error", f"Queue failed: {e}"))
         else:
-            self._incoming.put(("info", f"Queue finished ({len(results)} set(s))"))
-            for index, result in enumerate(results, start=1):
-                for path in result.files:
-                    self._incoming.put(("info", f"   set {index}: saved {path}"))
+            self._incoming.put(("info", f"Queue finished ({len(runner.items)} set(s))"))
+        result = runner.result
+        if result is not None:
+            self._incoming.put(("info", f"Results in {result.folder}"))
+            for path in result.files:
+                self._incoming.put(("info", f"   {path.name}"))
         self._incoming.put(("finished", ""))
 
     def _on_progress(self, set_index: int, transient: int, received: int, expected: int) -> None:
@@ -401,6 +420,24 @@ class App(tk.Tk):
         total = item.config.output.average_count
         self._incoming.put(("progress", f"Set {set_index}/{len(self._queue)}, transient {transient}/{total}: "
                                         f"{received}/{expected} points"))
+
+    # --------------------------------------------------------------- results
+
+    def _results_dir(self) -> Path:
+        path = self._system.data_output
+        return path if path.is_absolute() else PACKAGE_DIR / path
+
+    def _ensure_results_dir(self) -> Path:
+        """Create the results folder (and its parents, e.g. data/) if it does not exist."""
+        path = self._results_dir()
+        if not path.is_dir():
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+            except OSError as e:
+                self._log("error", f"Cannot create the results folder {path}: {e}")
+                raise
+            self._log("info", f"Created the results folder {path}")
+        return path
 
     # ------------------------------------------------------------------- log
 
@@ -425,6 +462,9 @@ class App(tk.Tk):
                 self._progress_label.config(text=text)
                 self._log("info", text)
             elif tag == "finished":
+                result = self._runner.result if self._runner else None
+                if result is not None and any(g.transients for g in result.groups):
+                    ResultsViewer(self, result)
                 self._runner = None
                 self._progress_label.config(text="")
                 self._update_run_button()

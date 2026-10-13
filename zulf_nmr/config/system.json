@@ -11,6 +11,6 @@
     "motor_timeout_s": 15.0
   },
   "directories": {
-    "data_output": "measurements/"
+    "data_output": "data/results/"
   }
 }

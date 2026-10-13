@@ -5,10 +5,14 @@ from __future__ import annotations
 import json
 import logging
 import math
+import shutil
 import threading
 from dataclasses import dataclass, field
+from datetime import datetime
 from pathlib import Path
 from typing import Callable
+
+import numpy as np
 
 from zulf_nmr.core.spectrometer import Spectrometer
 from zulf_nmr.experiment.parser import (
@@ -17,7 +21,8 @@ from zulf_nmr.experiment.parser import (
     HardwareLimits,
     load_experiment_config,
 )
-from zulf_nmr.experiment.runner import ExperimentAborted, ExperimentRunner, RunResult
+from zulf_nmr.experiment.runner import ExperimentAborted, ExperimentRunner, average, save_csv
+from zulf_nmr.experiment.simulation import simulate_set
 from zulf_nmr.hardware.awg import AwgWaveform, load_awg_npz
 
 log = logging.getLogger(__name__)
@@ -136,27 +141,88 @@ def queue_errors(items: list[QueueItem]) -> list[str]:
     return problems
 
 
+@dataclass
+class Transient:
+    number: int  # nnn in the file name: 1, 2, 3... within its configuration
+    set_index: int  # position in the queue, 1-based
+    file: Path
+    data: np.ndarray
+
+
+@dataclass
+class ResultGroup:
+    """All sets of the queue that used the same configuration file."""
+
+    name: str  # experiment_name, made unique within the run
+    config_source: Path
+    sample_rate_hz: float
+    file_format: str
+    config_file: Path
+    awg_file: Path | None = None
+    transients: list[Transient] = field(default_factory=list)
+    average_file: Path | None = None
+    average: np.ndarray | None = None
+
+
+@dataclass
+class QueueResult:
+    """Where the results of one queue run were saved."""
+
+    folder: Path
+    groups: list[ResultGroup] = field(default_factory=list)  # in order of first use
+
+    @property
+    def files(self) -> list[Path]:
+        """Every saved file, grouped by configuration: config, AWG, transients, average."""
+        files: list[Path] = []
+        for group in self.groups:
+            files += [group.config_file, *([group.awg_file] if group.awg_file else [])]
+            files += [t.file for t in group.transients]
+            files += [group.average_file] if group.average_file else []
+        return files
+
+
 class QueueRunner:
     """Runs the sets in order; after each set (except the last) waits its delay.
 
+    Results go to <results_root>/<stamp>/ where stamp = yyyymmdd_hhmmss of the start.
+    Sets that use the same configuration file form a group; for every group:
+        <stamp>_<name>_config.json                  - copy of the configuration file
+        <stamp>_<name>_awg.npz                      - copy of its AWG sequence (if any)
+        <stamp>_<name>_transient_<nnn>.<format>     - one per set; nnn counts from 001
+                                                      separately for every configuration
+        <stamp>_<name>_average.<format>             - mean of the group's transients
+    name is the experiment_name; two different files with the same experiment_name
+    get _2, _3... appended. The average is rewritten after every set, so it is up
+    to date even if the queue is aborted.
+
+    simulate=True produces simulated data instead of talking to the device
+    (spectrometer may then be None).
     on_status(text) reports what is happening (set started, waiting...);
     on_progress(set_index, transient, received, expected) forwards runner progress.
     """
 
     def __init__(
         self,
-        spectrometer: Spectrometer,
+        spectrometer: Spectrometer | None,
         items: list[QueueItem],
+        results_root: str | Path,
+        simulate: bool = False,
         on_status: Callable[[str], None] | None = None,
         on_progress: Callable[[int, int, int, int], None] | None = None,
     ) -> None:
         problems = queue_errors(items)
         if problems:
             raise ValueError("; ".join(problems))
+        if spectrometer is None and not simulate:
+            raise ValueError("a spectrometer is required unless simulate=True")
         self.spec = spectrometer
         self.items = list(items)
+        self.results_root = Path(results_root)
+        self.simulate = simulate
         self.on_status = on_status
         self.on_progress = on_progress
+        self.result: QueueResult | None = None  # set as soon as the folder exists
         self._abort = threading.Event()
         self._current: ExperimentRunner | None = None
 
@@ -167,29 +233,80 @@ class QueueRunner:
         if runner is not None:
             runner.abort()
 
-    def run(self) -> list[RunResult]:
+    def run(self) -> QueueResult:
         self._abort.clear()
-        results: list[RunResult] = []
+        stamp = f"{datetime.now():%Y%m%d_%H%M%S}"
+        folder = self.results_root / stamp
+        folder.mkdir(parents=True, exist_ok=True)
+        self.result = result = QueueResult(folder)
+        groups: dict[Path, ResultGroup] = {}
+
         n = len(self.items)
         for index, item in enumerate(self.items, start=1):
             if self._abort.is_set():
                 raise ExperimentAborted("Queue aborted by user")
-            self._status(f"Set {index}/{n}: {item.name} running")
-            self._current = ExperimentRunner(
-                self.spec,
-                item.config,
-                awg_waveform=item.awg,
-                on_progress=lambda t, r, e, i=index: self.on_progress and self.on_progress(i, t, r, e),
+            group = groups.get(item.path.resolve())
+            if group is None:
+                group = groups[item.path.resolve()] = self._new_group(item, folder, stamp, result.groups)
+                result.groups.append(group)
+
+            mode = " (simulated)" if self.simulate else ""
+            self._status(f"Set {index}/{n}: {item.name} running{mode}")
+            data = self._acquire(item, index)
+
+            number = len(group.transients) + 1
+            name = f"{stamp}_{group.name}_transient_{number:03d}.{group.file_format}"
+            path = save_csv(folder / name, data, group.sample_rate_hz)
+            group.transients.append(Transient(number, index, path, data))
+            group.average = average([t.data for t in group.transients])
+            group.average_file = save_csv(
+                folder / f"{stamp}_{group.name}_average.{group.file_format}", group.average, group.sample_rate_hz
             )
-            try:
-                results.append(self._current.run())
-            finally:
-                self._current = None
+
             if index < n and item.delay_s > 0:
                 self._status(f"Waiting {format_delay(item.delay_s)} before set {index + 1}/{n}")
                 if self._abort.wait(item.delay_s):
                     raise ExperimentAborted("Queue aborted by user")
-        return results
+        return result
+
+    @staticmethod
+    def _new_group(item: QueueItem, folder: Path, stamp: str, existing: list[ResultGroup]) -> ResultGroup:
+        """Start a group for a configuration file and copy the file (and its AWG sequence)."""
+        cfg = item.config
+        used = {g.name for g in existing}
+        name, k = cfg.experiment_name, 2
+        while name in used:
+            name, k = f"{cfg.experiment_name}_{k}", k + 1
+        config_file = folder / f"{stamp}_{name}_config.json"
+        shutil.copyfile(item.path, config_file)
+        awg_file = None
+        if item.awg is not None and item.awg.source_path is not None:
+            awg_file = folder / f"{stamp}_{name}_awg{item.awg.source_path.suffix}"
+            shutil.copyfile(item.awg.source_path, awg_file)
+        return ResultGroup(
+            name=name,
+            config_source=item.path,
+            sample_rate_hz=cfg.hardware_parameters.acq_sample_rate_hz,
+            file_format=cfg.output.format,
+            config_file=config_file,
+            awg_file=awg_file,
+        )
+
+    def _acquire(self, item: QueueItem, index: int) -> np.ndarray:
+        """Data of one set: the average of its output.average_count transients."""
+        if self.simulate:
+            return simulate_set(item.config)
+        self._current = ExperimentRunner(
+            self.spec,
+            item.config,
+            awg_waveform=item.awg,
+            auto_save=False,  # saved here, with the queue's names
+            on_progress=lambda t, r, e: self.on_progress and self.on_progress(index, t, r, e),
+        )
+        try:
+            return self._current.run().average
+        finally:
+            self._current = None
 
     def _status(self, text: str) -> None:
         log.info(text)

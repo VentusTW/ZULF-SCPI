@@ -56,6 +56,7 @@ class ExperimentRunner:
         timeout_margin_s: float = 30.0,
         on_progress: Callable[[int, int, int], None] | None = None,
         awg_waveform: AwgWaveform | None = None,
+        auto_save: bool | None = None,
     ) -> None:
         """on_progress(transient, points_received, points_expected) is called after every chunk."""
         self.spec = spectrometer
@@ -67,6 +68,8 @@ class ExperimentRunner:
         self.timeout_margin_s = timeout_margin_s
         self.on_progress = on_progress
         self.awg_waveform = awg_waveform
+        # None = output.auto_save from the experiment file; False when the caller saves the data.
+        self.auto_save = config.output.auto_save if auto_save is None else auto_save
         self.sequence: CompiledSequence = compile_experiment(config)
         self._abort = threading.Event()
 
@@ -86,7 +89,7 @@ class ExperimentRunner:
         self._abort.clear()
         result = RunResult()
         prefix = self._file_prefix()
-        if self.config.output.auto_save:
+        if self.auto_save:
             self.output_dir.mkdir(parents=True, exist_ok=True)
             result.files.append(self._save_config(prefix))
 
@@ -99,8 +102,8 @@ class ExperimentRunner:
                 log.info("Transient %d/%d", i, n)
                 data = self._run_transient(i)
                 result.transients.append(data)
-                result.average = _average(result.transients)
-                if self.config.output.auto_save:
+                result.average = average(result.transients)
+                if self.auto_save:
                     result.files.append(self._save_csv(f"{prefix}_transient_{i:03d}.csv", data))
                     avg_path = self._save_csv(f"{prefix}_average.csv", result.average)
                     if avg_path not in result.files:
@@ -173,22 +176,25 @@ class ExperimentRunner:
         return path
 
     def _save_csv(self, name: str, data: np.ndarray) -> Path:
-        path = self.output_dir / name
-        rate = self.config.hardware_parameters.acq_sample_rate_hz
-        t = np.arange(len(data)) / rate
-        columns = data.reshape(len(data), -1)
-        signal_names = ["signal"] if columns.shape[1] == 1 else [f"ch{i + 1}" for i in range(columns.shape[1])]
-        np.savetxt(
-            path,
-            np.column_stack([t, columns]),
-            delimiter=",",
-            header=",".join(["time_s", *signal_names]),
-            comments="",
-            fmt="%.9g",
-        )
-        return path
+        return save_csv(self.output_dir / name, data, self.config.hardware_parameters.acq_sample_rate_hz)
 
 
-def _average(transients: list[np.ndarray]) -> np.ndarray:
+def save_csv(path: Path, data: np.ndarray, sample_rate_hz: float) -> Path:
+    """Save samples with a time column: time_s,signal (or ch1, ch2... for 2-D data)."""
+    t = np.arange(len(data)) / sample_rate_hz
+    columns = data.reshape(len(data), -1)
+    signal_names = ["signal"] if columns.shape[1] == 1 else [f"ch{i + 1}" for i in range(columns.shape[1])]
+    np.savetxt(
+        path,
+        np.column_stack([t, columns]),
+        delimiter=",",
+        header=",".join(["time_s", *signal_names]),
+        comments="",
+        fmt="%.9g",
+    )
+    return path
+
+
+def average(transients: list[np.ndarray]) -> np.ndarray:
     n = min(len(t) for t in transients)
     return np.mean([t[:n] for t in transients], axis=0)
