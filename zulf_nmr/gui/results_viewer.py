@@ -25,17 +25,19 @@ class TraceRow:
     """One trace: all channels in time (left) and the spectrum of the selected range (right).
 
     The time plot shows VIEW_S at first; Ctrl + wheel zooms it, Shift + wheel moves it.
-    Drag on the time plot to choose the range of the spectrum; drag the selection to move it.
+    Drag on the time plot to choose the range of the spectrum; drag the selection to move it;
+    a click (left, without dragging, or right) removes it - the spectrum is then of the whole trace.
     A row of a transient that is still being received follows its newest samples
     until the user zooms or moves it.
     """
 
     def __init__(self, master: tk.Misc, sample_rate_hz: float, channels: tuple[int, ...], average: bool,
-                 total_samples: int | None = None, on_scroll=None) -> None:
+                 total_samples: int | None = None, on_scroll=None, start_s: float = 0.0) -> None:
         self.rate = sample_rate_hz
         self.channels = channels
         self.average = average
-        self.total_s = (total_samples or 0) / sample_rate_hz
+        self.start_s = start_s  # acquisition start, seconds after the sequence start
+        self.total_s = start_s + (total_samples or 0) / sample_rate_hz  # end of the time axis
         self.data = np.empty((0, len(channels)))
         self.title = ""
         self.t_range: tuple[float, float] | None = None
@@ -48,37 +50,57 @@ class TraceRow:
         self.widget = self.canvas.get_tk_widget()
         self.selector: SpanSelector | None = None
         self.canvas.mpl_connect("scroll_event", self._on_scroll)
+        self.canvas.mpl_connect("button_press_event", self._on_press)
 
     def show(self, data: np.ndarray, title: str, live: bool = False) -> None:
         """Draw new data (a new trace, or an updated average); the selected range and the
         zoom are kept. live: the trace is still growing - show its newest samples."""
         self.data, self.title = data, title
-        draw_time(self.ax_time, data, self.rate, self.channels, title, self.average, self._xlim(live))
+        draw_time(self.ax_time, data, self.rate, self.channels, title, self.average, self._xlim(live),
+                  self.start_s)
         self._draw_spectrum()
         # ax.clear() removes the selector's artists, so a new one is made for every redraw.
         self.selector = SpanSelector(
             self.ax_time, self._on_select, "horizontal", useblit=False, interactive=True,
-            drag_from_anywhere=True, props=dict(facecolor=SELECTION_COLOUR, alpha=0.25),
+            drag_from_anywhere=True, button=1, props=dict(facecolor=SELECTION_COLOUR, alpha=0.25),
         )
         if self.t_range is not None:
             self.selector.extents = self.t_range
         self.canvas.draw_idle()
 
     def _on_select(self, t0: float, t1: float) -> None:
-        self.t_range = None if t1 - t0 <= 0 else (max(t0, 0.0), t1)
+        if t1 - t0 <= 0:  # a click without dragging
+            self.clear_selection()
+            return
+        self.t_range = (max(t0, self.start_s), t1)
         self._draw_spectrum()
         self.canvas.draw_idle()
 
+    def clear_selection(self) -> None:
+        """Remove the selected range; the spectrum is of the whole trace again."""
+        self.t_range = None
+        if self.selector is not None:
+            self.selector.clear()
+        self._draw_spectrum()
+        self.canvas.draw_idle()
+
+    def _on_press(self, event) -> None:
+        if event.button == 3 and event.inaxes is self.ax_time:
+            self.clear_selection()
+
     def _draw_spectrum(self) -> None:
-        draw_spectrum(self.ax_spec, self.data, self.rate, self.channels, self.t_range, self.average)
+        draw_spectrum(self.ax_spec, self.data, self.rate, self.channels, self.t_range, self.average,
+                      self.start_s)
 
     def _xlim(self, live: bool) -> tuple[float, float]:
         if self.view is not None:
             start, width = self.view
         else:
-            width = min(VIEW_S, self.total_s or VIEW_S)
-            newest = len(self.data) / self.rate
-            start = max(0.0, newest - width) if live else 0.0
+            # The first VIEW_S of the recording (not the empty time before it), or while
+            # the trace is still growing, its newest VIEW_S.
+            width = min(VIEW_S, (self.total_s - self.start_s) or VIEW_S)
+            newest = self.start_s + len(self.data) / self.rate
+            start = max(self.start_s, newest - width) if live else self.start_s
         return start, start + width
 
     def _on_scroll(self, event) -> None:
@@ -92,13 +114,17 @@ class TraceRow:
         width = end - start
         if ctrl:  # zoom around the cursor
             new_width = width / ZOOM_STEP if event.step > 0 else width * ZOOM_STEP
-            new_width = min(max(new_width, 5 / self.rate), max(self.total_s, len(self.data) / self.rate, VIEW_S))
+            new_width = min(max(new_width, 5 / self.rate),
+                            max(self.total_s, self.start_s + len(self.data) / self.rate, VIEW_S))
             x = event.xdata if event.xdata is not None else start + width / 2
             start = x - (x - start) * new_width / width
             width = new_width
         else:  # move along the time axis
             start -= event.step * PAN_STEP * width
-        start = max(0.0, start)
+        # Stay within 0 (sequence start) .. the end of the recording.
+        end_s = max(self.total_s, self.start_s + len(self.data) / self.rate)
+        width = min(width, end_s)
+        start = max(0.0, min(start, end_s - width))
         self.view = (start, width)
         self.ax_time.set_xlim(start, start + width)
         self.canvas.draw_idle()
@@ -122,7 +148,7 @@ class ResultsViewer(tk.Toplevel):
         self._status.pack(side="left")
         ttk.Button(bottom, text="Close", command=self.destroy).pack(side="right")
         ttk.Label(bottom, text="Time plot: Ctrl + wheel zooms, Shift + wheel moves, "
-                               "drag chooses the range of the spectrum.",
+                               "drag chooses the range of the spectrum, a click removes it.",
                   foreground="#666666").pack(side="right", padx=12)
 
         holder = ttk.Frame(self)
@@ -163,7 +189,7 @@ class ResultsViewer(tk.Toplevel):
         if average is None:
             average = self._averages[group.set_index] = TraceRow(
                 self._inner, group.sample_rate_hz, group.channels, average=True,
-                total_samples=len(average_data), on_scroll=self._scroll)
+                total_samples=len(average_data), on_scroll=self._scroll, start_s=group.acquisition_start_s)
             self._pack(average)
         of = "" if count == group.expected_transients else f" (so far {count} of {group.expected_transients})"
         average.show(average_data, f"Set {group.set_index}: average of {count} transient(s){of}\n"
@@ -182,7 +208,7 @@ class ResultsViewer(tk.Toplevel):
         if row is None:
             row = self._rows[key] = TraceRow(self._inner, group.sample_rate_hz, group.channels,
                                              average=False, total_samples=total_samples,
-                                             on_scroll=self._scroll)
+                                             on_scroll=self._scroll, start_s=group.acquisition_start_s)
             average = self._averages.get(group.set_index)
             self._pack(row, before=average.widget if average else None)
         return row

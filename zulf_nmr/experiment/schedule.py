@@ -23,6 +23,7 @@ from zulf_nmr.experiment.parser import (
     load_experiment_config,
 )
 from zulf_nmr.experiment.runner import ExperimentAborted, ExperimentRunner, average, save_csv
+from zulf_nmr.experiment.sequence import acquisition_window_ms
 from zulf_nmr.experiment.simulation import SIM_CHUNKS, SIM_TRANSIENT_S, choose_waves, simulate_transient
 from zulf_nmr.hardware.awg import AwgWaveform, load_awg_npz
 
@@ -161,6 +162,7 @@ class ResultGroup:
     channels: tuple[int, ...]  # acquisition.channels - the data columns, in this order
     file_format: str
     expected_transients: int  # output.average_count
+    acquisition_start_s: float  # start of the recording, seconds after the sequence start (:SEQ:RUN)
     config_file: Path
     awg_file: Path | None = None
     transients: list[Transient] = field(default_factory=list)
@@ -279,6 +281,7 @@ class QueueRunner:
     def _new_group(item: QueueItem, index: int, name: str, folder: Path, stamp: str) -> ResultGroup:
         """Start the files of one set: copy its configuration file (and AWG sequence)."""
         cfg = item.config
+        window = acquisition_window_ms(cfg)
         config_file = folder / f"{stamp}_{name}_config.json"
         shutil.copyfile(item.path, config_file)
         awg_file = None
@@ -293,6 +296,7 @@ class QueueRunner:
             channels=cfg.acquisition.channels,
             file_format=cfg.output.format,
             expected_transients=cfg.output.average_count,
+            acquisition_start_s=window[0] / 1000 if window else 0.0,
             config_file=config_file,
             awg_file=awg_file,
         )

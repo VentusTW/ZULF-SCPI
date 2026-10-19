@@ -37,7 +37,8 @@ def spectrum(data: np.ndarray, sample_rate_hz: float) -> tuple[np.ndarray, np.nd
     The mean of each column is removed first so the DC term does not dominate;
     the scale is the amplitude of a sine (2/N x |FFT|).
     """
-    data = data.reshape(len(data), -1)
+    if data.ndim == 1:
+        data = data[:, None]
     if len(data) < 2:
         return np.zeros(1), np.zeros((1, data.shape[1]))
     centred = data - data.mean(axis=0)
@@ -46,19 +47,24 @@ def spectrum(data: np.ndarray, sample_rate_hz: float) -> tuple[np.ndarray, np.nd
 
 
 def draw_time(ax: Axes, data: np.ndarray, sample_rate_hz: float, channels: tuple[int, ...],
-              title: str, average: bool = False, xlim: tuple[float, float] | None = None) -> None:
+              title: str, average: bool = False, xlim: tuple[float, float] | None = None,
+              start_s: float = 0.0) -> None:
     """All channels of one trace on one plot, one colour per channel, with a legend.
 
-    The curves are smoothed for drawing (smooth_for_display); xlim is the shown
-    time range in seconds.
+    The time axis counts from the start of the sequence; the first sample is at
+    start_s (the acquisition start), so the plot is empty before it. The curves
+    are smoothed for drawing (smooth_for_display); xlim is the shown range in seconds.
     """
     ax.clear()
     data = data.reshape(len(data), -1)
     t, values = smooth_for_display(data, sample_rate_hz)
+    t = t + start_s
     for col, channel in enumerate(channels):
         ax.plot(t, values[:, col], color=channel_colour(channel), linewidth=1.0, label=f"CH{channel}")
+    if start_s > 0:
+        ax.axvline(start_s, color="#999999", linewidth=0.8, linestyle="--")
     ax.set_title(title, loc="left", fontsize=8, fontweight="bold" if average else None)
-    ax.set_xlabel("Time from the start of the acquisition (s)", fontsize=8)
+    ax.set_xlabel("Time from the start of the sequence (s)", fontsize=8)
     ax.set_ylabel("Signal", fontsize=8)
     if xlim is not None:
         ax.set_xlim(*xlim)
@@ -67,18 +73,21 @@ def draw_time(ax: Axes, data: np.ndarray, sample_rate_hz: float, channels: tuple
 
 
 def draw_spectrum(ax: Axes, data: np.ndarray, sample_rate_hz: float, channels: tuple[int, ...],
-                  t_range: tuple[float, float] | None = None, average: bool = False) -> None:
-    """Spectrum of the samples in t_range (seconds from the start of the acquisition, None = all)."""
+                  t_range: tuple[float, float] | None = None, average: bool = False,
+                  start_s: float = 0.0) -> None:
+    """Spectrum of the samples in t_range (seconds from the start of the sequence, None = all);
+    start_s is the time of the first sample."""
     ax.clear()
     data = data.reshape(len(data), -1)
     i0, i1 = 0, len(data)
     if t_range is not None:
-        i0 = max(0, int(round(t_range[0] * sample_rate_hz)))
-        i1 = min(len(data), int(round(t_range[1] * sample_rate_hz)))
+        i0 = min(len(data), max(0, int(round((t_range[0] - start_s) * sample_rate_hz))))
+        i1 = min(len(data), max(0, int(round((t_range[1] - start_s) * sample_rate_hz))))
     freqs, amplitude = spectrum(data[i0:i1], sample_rate_hz)
     for col, channel in enumerate(channels):
         ax.plot(freqs, amplitude[:, col], color=channel_colour(channel), linewidth=0.8, label=f"CH{channel}")
-    span = f"{i0 / sample_rate_hz:g} – {i1 / sample_rate_hz:g} s" if i1 > i0 else "empty range"
+    span = (f"{start_s + i0 / sample_rate_hz:g} – {start_s + i1 / sample_rate_hz:g} s"
+            if i1 > i0 else "no samples in the range")
     ax.set_title(f"Spectrum, {span} ({max(i1 - i0, 0)} samples)", loc="left", fontsize=9)
     ax.set_xlabel("Frequency (Hz)", fontsize=8)
     ax.set_ylabel("Amplitude", fontsize=8)
