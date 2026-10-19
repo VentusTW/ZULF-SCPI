@@ -23,7 +23,7 @@ from zulf_nmr.experiment.parser import (
     load_experiment_config,
 )
 from zulf_nmr.experiment.runner import ExperimentAborted, ExperimentRunner, average, save_csv
-from zulf_nmr.experiment.simulation import SIM_CHUNKS, SIM_TRANSIENT_S, simulate_transient
+from zulf_nmr.experiment.simulation import SIM_CHUNKS, SIM_TRANSIENT_S, choose_waves, simulate_transient
 from zulf_nmr.hardware.awg import AwgWaveform, load_awg_npz
 
 log = logging.getLogger(__name__)
@@ -325,8 +325,9 @@ class QueueRunner:
                 self.on_live(group, number, data)
 
         if self.simulate:
+            waves = choose_waves(item.config)  # sin or cos per channel, the same for the whole set
             for number in range(1, item.config.output.average_count + 1):
-                on_transient(number, self._simulate(item, number, progress, live))
+                on_transient(number, self._simulate(item, number, waves, progress, live))
             return
         self._current = ExperimentRunner(
             self.spec,
@@ -342,9 +343,9 @@ class QueueRunner:
         finally:
             self._current = None
 
-    def _simulate(self, item: QueueItem, number: int, progress, live) -> np.ndarray:
+    def _simulate(self, item: QueueItem, number: int, waves: dict[int, str], progress, live) -> np.ndarray:
         """Simulated transient, delivered in parts over SIM_TRANSIENT_S like a real acquisition."""
-        data = simulate_transient(item.config, number)
+        data = simulate_transient(item.config, waves)
         n = len(data)
         for part in range(1, SIM_CHUNKS + 1):
             if self._abort.wait(SIM_TRANSIENT_S / SIM_CHUNKS):
