@@ -7,6 +7,7 @@ import logging
 import math
 import shutil
 import threading
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
@@ -153,7 +154,7 @@ class Transient:
 class ResultGroup:
     """One set of the queue: its copied configuration, its transients and their average."""
 
-    name: str  # <experiment_name>_<occurrence>, e.g. ZULF_Thermal_Example_002
+    name: str  # experiment_name, plus _<occurrence> if it is in the queue more than once
     set_index: int  # position in the queue, 1-based
     config_source: Path
     sample_rate_hz: float
@@ -189,12 +190,13 @@ class QueueRunner:
 
     Results go to <results_root>/<stamp>/ where stamp = yyyymmdd_hhmmss of the start.
     Every set runs output.average_count transients and gets its own files:
-        <stamp>_<name>_<occ>_config.json                - copy of the configuration file
-        <stamp>_<name>_<occ>_awg.npz                    - copy of its AWG sequence (if any)
-        <stamp>_<name>_<occ>_transient_<nnn>.<format>   - nnn = 001 .. average_count
-        <stamp>_<name>_<occ>_average.<format>           - mean of this set's transients
-    name is the experiment_name and occ counts its occurrences in the queue (001 for
-    the first set with that name, 002 for the second...). Every transient is saved as
+        <stamp>_<name>_config.json                - copy of the configuration file
+        <stamp>_<name>_awg.npz                    - copy of its AWG sequence (if any)
+        <stamp>_<name>_transient_<nnn>.<format>   - nnn = 001 .. average_count
+        <stamp>_<name>_average.<format>           - mean of this set's transients
+    name is the experiment_name. If several sets have the same experiment_name, each
+    gets _<occ> appended (_001 for the first, _002 for the second...), e.g.
+    <stamp>_ZULF_Thermal_Example_002_transient_001.csv. Every transient is saved as
     soon as it is complete and the average rewritten, so an aborted queue keeps them.
 
     simulate=True produces simulated data instead of talking to the device
@@ -240,15 +242,17 @@ class QueueRunner:
         folder = self.results_root / stamp
         folder.mkdir(parents=True, exist_ok=True)
         self.result = result = QueueResult(folder)
-        occurrences: dict[str, int] = {}
+        totals = Counter(item.config.experiment_name for item in self.items)
+        occurrences: Counter[str] = Counter()
 
         n = len(self.items)
         for index, item in enumerate(self.items, start=1):
             if self._abort.is_set():
                 raise ExperimentAborted("Queue aborted by user")
             exp_name = item.config.experiment_name
-            occurrences[exp_name] = occurrences.get(exp_name, 0) + 1
-            group = self._new_group(item, index, f"{exp_name}_{occurrences[exp_name]:03d}", folder, stamp)
+            occurrences[exp_name] += 1
+            name = exp_name if totals[exp_name] == 1 else f"{exp_name}_{occurrences[exp_name]:03d}"
+            group = self._new_group(item, index, name, folder, stamp)
             result.groups.append(group)
 
             mode = " (simulated)" if self.simulate else ""
