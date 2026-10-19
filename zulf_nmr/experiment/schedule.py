@@ -23,7 +23,7 @@ from zulf_nmr.experiment.parser import (
     load_experiment_config,
 )
 from zulf_nmr.experiment.runner import ExperimentAborted, ExperimentRunner, average, save_csv
-from zulf_nmr.experiment.simulation import simulate_transient
+from zulf_nmr.experiment.simulation import SIM_CHUNKS, SIM_TRANSIENT_S, simulate_transient
 from zulf_nmr.hardware.awg import AwgWaveform, load_awg_npz
 
 log = logging.getLogger(__name__)
@@ -158,6 +158,7 @@ class ResultGroup:
     set_index: int  # position in the queue, 1-based
     config_source: Path
     sample_rate_hz: float
+    channels: tuple[int, ...]  # acquisition.channels - the data columns, in this order
     file_format: str
     expected_transients: int  # output.average_count
     config_file: Path
@@ -202,7 +203,11 @@ class QueueRunner:
     simulate=True produces simulated data instead of talking to the device
     (spectrometer may then be None).
     on_status(text) reports what is happening (set started, waiting...);
-    on_progress(set_index, transient, received, expected) forwards runner progress.
+    on_progress(set_index, transient, received, expected) forwards runner progress;
+    on_live(group, transient_number, data_so_far) shows a transient while it is being
+    acquired (a few times per second); on_result(group, transient) is called after every
+    saved transient (group.average is already updated). All callbacks run in the thread
+    that called run().
     """
 
     def __init__(
@@ -213,6 +218,8 @@ class QueueRunner:
         simulate: bool = False,
         on_status: Callable[[str], None] | None = None,
         on_progress: Callable[[int, int, int, int], None] | None = None,
+        on_result: Callable[[ResultGroup, Transient], None] | None = None,
+        on_live: Callable[[ResultGroup, int, np.ndarray], None] | None = None,
     ) -> None:
         problems = queue_errors(items)
         if problems:
@@ -225,6 +232,8 @@ class QueueRunner:
         self.simulate = simulate
         self.on_status = on_status
         self.on_progress = on_progress
+        self.on_result = on_result
+        self.on_live = on_live
         self.result: QueueResult | None = None  # set as soon as the folder exists
         self._abort = threading.Event()
         self._current: ExperimentRunner | None = None
@@ -258,7 +267,7 @@ class QueueRunner:
             mode = " (simulated)" if self.simulate else ""
             self._status(f"Set {index}/{n}: {group.name} running, "
                          f"{group.expected_transients} transient(s){mode}")
-            self._acquire(item, index, lambda number, data: self._save_transient(group, number, data, stamp))
+            self._acquire(item, group, lambda number, data: self._save_transient(group, number, data, stamp))
 
             if index < n and item.delay_s > 0:
                 self._status(f"Waiting {format_delay(item.delay_s)} before set {index + 1}/{n}")
@@ -281,43 +290,70 @@ class QueueRunner:
             set_index=index,
             config_source=item.path,
             sample_rate_hz=cfg.hardware_parameters.acq_sample_rate_hz,
+            channels=cfg.acquisition.channels,
             file_format=cfg.output.format,
             expected_transients=cfg.output.average_count,
             config_file=config_file,
             awg_file=awg_file,
         )
 
-    @staticmethod
-    def _save_transient(group: ResultGroup, number: int, data: np.ndarray, stamp: str) -> None:
+    def _save_transient(self, group: ResultGroup, number: int, data: np.ndarray, stamp: str) -> None:
         folder = group.config_file.parent
         name = f"{stamp}_{group.name}_transient_{number:03d}.{group.file_format}"
-        path = save_csv(folder / name, data, group.sample_rate_hz)
-        group.transients.append(Transient(number, group.set_index, path, data))
+        path = save_csv(folder / name, data, group.sample_rate_hz, group.channels)
+        transient = Transient(number, group.set_index, path, data)
+        group.transients.append(transient)
         group.average = average([t.data for t in group.transients])
         group.average_file = save_csv(
-            folder / f"{stamp}_{group.name}_average.{group.file_format}", group.average, group.sample_rate_hz
+            folder / f"{stamp}_{group.name}_average.{group.file_format}", group.average, group.sample_rate_hz,
+            group.channels,
         )
+        if self.on_result:
+            self.on_result(group, transient)
 
-    def _acquire(self, item: QueueItem, index: int, on_transient: Callable[[int, np.ndarray], None]) -> None:
+    def _acquire(self, item: QueueItem, group: ResultGroup,
+                 on_transient: Callable[[int, np.ndarray], None]) -> None:
         """Run the output.average_count transients of one set, passing each to on_transient."""
+        index = group.set_index
+
+        def progress(number: int, received: int, expected: int) -> None:
+            if self.on_progress:
+                self.on_progress(index, number, received, expected)
+
+        def live(number: int, data: np.ndarray) -> None:
+            if self.on_live:
+                self.on_live(group, number, data)
+
         if self.simulate:
             for number in range(1, item.config.output.average_count + 1):
-                if self._abort.is_set():
-                    raise ExperimentAborted("Queue aborted by user")
-                on_transient(number, simulate_transient(item.config))
+                on_transient(number, self._simulate(item, number, progress, live))
             return
         self._current = ExperimentRunner(
             self.spec,
             item.config,
             awg_waveform=item.awg,
             auto_save=False,  # saved here, with the queue's names
-            on_progress=lambda t, r, e: self.on_progress and self.on_progress(index, t, r, e),
+            on_progress=progress,
             on_transient=on_transient,
+            on_data=live,
         )
         try:
             self._current.run()
         finally:
             self._current = None
+
+    def _simulate(self, item: QueueItem, number: int, progress, live) -> np.ndarray:
+        """Simulated transient, delivered in parts over SIM_TRANSIENT_S like a real acquisition."""
+        data = simulate_transient(item.config, number)
+        n = len(data)
+        for part in range(1, SIM_CHUNKS + 1):
+            if self._abort.wait(SIM_TRANSIENT_S / SIM_CHUNKS):
+                raise ExperimentAborted("Queue aborted by user")
+            received = n * part // SIM_CHUNKS
+            progress(number, received, n)
+            if part < SIM_CHUNKS:
+                live(number, data[:received])
+        return data
 
     def _status(self, text: str) -> None:
         log.info(text)

@@ -5,12 +5,14 @@ from __future__ import annotations
 import argparse
 import json
 from pathlib import Path
-from typing import Iterable
+from dataclasses import dataclass
+from typing import Iterable, Sequence
 
 import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure, SubFigure
 from matplotlib.lines import Line2D
+from matplotlib.patches import Rectangle
 
 from zulf_nmr.core.scpi import mnemonic_matches
 from zulf_nmr.experiment.parser import Event, ExperimentConfig
@@ -50,30 +52,55 @@ def load_events(source: ExperimentConfig | str | Path) -> tuple[str, list[Event]
     return data.get("experiment_name", path.stem), sorted(events, key=lambda e: e.time_ms)
 
 
+ACQUISITION_COLOUR = "#D55E00"
+
+
+@dataclass(frozen=True)
+class AcquisitionWindow:
+    """Acquisition shown on the timeline: start and end in ms of the sequence, and its channels."""
+
+    start_ms: float
+    end_ms: float
+    channels: tuple[int, ...]
+
+
 def plot_events(
     events: Iterable[Event],
     title: str | None = None,
     ax: Axes | None = None,
+    durations_ms: Sequence[float | None] | None = None,
+    acquisition: AcquisitionWindow | None = None,
 ) -> Figure | SubFigure:
-    """Draw one row per event (first event on top): a dot at its time, the
-    command on the right, coloured by subsystem."""
+    """Draw one row per event (first event on top): a dot at its time, a bar as
+    long as its duration (durations_ms, one per event, None = unknown), the
+    command on the right, coloured by subsystem. acquisition adds a bottom row
+    with the recording window and its channels."""
     events = list(events)
+    durations = list(durations_ms) if durations_ms is not None else [None] * len(events)
+    n_rows = len(events) + (1 if acquisition else 0)
     if ax is None:
-        fig, ax = plt.subplots(figsize=(11, 0.45 * len(events) + 2))
+        fig, ax = plt.subplots(figsize=(11, 0.45 * n_rows + 2))
     else:
         fig = ax.figure
 
-    t_max = max((e.time_ms for e in events), default=0) or 1
-    rows = range(len(events), 0, -1)
+    ends = [e.time_ms + (d or 0) for e, d in zip(events, durations)]
+    if acquisition:
+        ends.append(acquisition.end_ms)
+    t_max = max(ends, default=0) or 1
+    rows = range(n_rows, 0, -1)
     used: dict[str, str] = {}
 
-    for y, event in zip(rows, events):
+    for y, event, duration in zip(rows, events, durations):
         name, colour = event_category(event.action)
         used.setdefault(name, colour)
         ax.hlines(y, 0, event.time_ms, color="#D0D0D0", linewidth=0.8, zorder=1)
+        if duration:
+            ax.add_patch(Rectangle((event.time_ms, y - 0.28), duration, 0.56, facecolor=colour,
+                                   alpha=0.35, edgecolor=colour, linewidth=0.8, zorder=2))
         ax.plot(event.time_ms, y, "o", color=colour, markersize=7, zorder=3)
+        label = f"{event.time_ms:g} ms" + (f"  (+{duration:g} ms)" if duration else "")
         ax.annotate(
-            f"{event.time_ms:g} ms", (event.time_ms, y), xytext=(6, 0),
+            label, (event.time_ms + (duration or 0), y), xytext=(6, 0),
             textcoords="offset points", va="center", fontsize=8, color="#404040",
         )
         ax.annotate(
@@ -81,8 +108,24 @@ def plot_events(
             va="center", fontsize=8, family="monospace", color=colour,
         )
 
+    if acquisition:
+        y = 1
+        width = acquisition.end_ms - acquisition.start_ms
+        ax.add_patch(Rectangle((acquisition.start_ms, y - 0.28), width, 0.56, facecolor=ACQUISITION_COLOUR,
+                               alpha=0.25, edgecolor=ACQUISITION_COLOUR, linewidth=1.0, zorder=2))
+        channels = ", ".join(map(str, acquisition.channels))
+        ax.annotate(
+            f"{acquisition.start_ms:g} – {acquisition.end_ms:g} ms", (acquisition.start_ms, y),
+            xytext=(4, 0), textcoords="offset points", va="center", fontsize=8, color="#404040",
+        )
+        ax.annotate(
+            f"Acquisition, CH {channels}", (1.01, y), xycoords=("axes fraction", "data"),
+            va="center", fontsize=8, family="monospace", color=ACQUISITION_COLOUR, fontweight="bold",
+        )
+        used.setdefault("Acquisition", ACQUISITION_COLOUR)
+
     ax.set_xlim(-0.03 * t_max, 1.12 * t_max)
-    ax.set_ylim(0.3, len(events) + 0.7)
+    ax.set_ylim(0.3, n_rows + 0.7)
     ax.set_yticks([])
     ax.set_xlabel("Time (ms)", fontweight="bold")
     ax.set_ylabel("Event", fontweight="bold")

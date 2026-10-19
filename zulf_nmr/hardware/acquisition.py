@@ -2,10 +2,33 @@
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, Callable
+
+import numpy as np
 
 if TYPE_CHECKING:
     from zulf_nmr.core.connection import SCPIConnection
+
+# ASSUMED - the SCPI dictionary has no ADC channel commands. The ADC has 4
+# detection channels and always records all of them; one sample (frame) is
+# 4 little-endian int16 values, channel 1 first. Channels not selected in the
+# experiment file are dropped on the PC.
+ADC_CHANNELS = (1, 2, 3, 4)
+FRAME_DTYPE = np.dtype(("<i2", len(ADC_CHANNELS)))
+
+
+def decode_frames(data: bytes) -> np.ndarray:
+    """(N, 4) array of raw ADC values from whole frames; len(data) must be a multiple of the frame size."""
+    if len(data) % FRAME_DTYPE.itemsize:
+        raise ValueError(f"{len(data)} bytes is not a whole number of {FRAME_DTYPE.itemsize}-byte frames")
+    return np.frombuffer(data, dtype="<i2").reshape(-1, len(ADC_CHANNELS)).astype(float)
+
+
+def duration_for_samples(number_of_samples: int, sample_rate_hz: float) -> int:
+    """:ACQuire:DURation value (whole ms) long enough to record number_of_samples."""
+    # round() first so that e.g. 20000 samples at 1 kHz gives 20000 ms, not 20001 (float error)
+    return max(1, math.ceil(round(number_of_samples / sample_rate_hz * 1000, 6)))
 
 
 class Acquisition:

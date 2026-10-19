@@ -16,14 +16,10 @@ import numpy as np
 from zulf_nmr.core.spectrometer import Spectrometer
 from zulf_nmr.experiment.parser import ExperimentConfig
 from zulf_nmr.experiment.sequence import CompiledSequence, compile_experiment
+from zulf_nmr.hardware.acquisition import FRAME_DTYPE, decode_frames
 from zulf_nmr.hardware.awg import AwgWaveform
 
 log = logging.getLogger(__name__)
-
-
-def decode_int16(chunk: bytes) -> np.ndarray:
-    """ASSUMED chunk format: one ADC channel, little-endian int16 samples, no checksum."""
-    return np.frombuffer(chunk, dtype="<i2").astype(float)
 
 
 class ExperimentAborted(RuntimeError):
@@ -50,7 +46,7 @@ class ExperimentRunner:
         spectrometer: Spectrometer,
         config: ExperimentConfig,
         output_dir: str | Path | None = None,
-        decode: Callable[[bytes], np.ndarray] = decode_int16,
+        decode: Callable[[bytes], np.ndarray] = decode_frames,
         is_valid_chunk: Callable[[bytes], bool] = lambda chunk: True,
         poll_s: float = 0.05,
         timeout_margin_s: float = 30.0,
@@ -58,9 +54,13 @@ class ExperimentRunner:
         awg_waveform: AwgWaveform | None = None,
         auto_save: bool | None = None,
         on_transient: Callable[[int, np.ndarray], None] | None = None,
+        on_data: Callable[[int, np.ndarray], None] | None = None,
+        data_interval_s: float = 0.2,
     ) -> None:
         """on_progress(transient, points_received, points_expected) is called after every chunk,
-        on_transient(transient, data) after every complete transient."""
+        on_data(transient, data_so_far) at most every data_interval_s while a transient is
+        being received (selected channels only), on_transient(transient, data) after every
+        complete transient."""
         self.spec = spectrometer
         self.config = config
         self.output_dir = Path(output_dir) if output_dir is not None else spectrometer.data_output
@@ -73,6 +73,8 @@ class ExperimentRunner:
         # None = output.auto_save from the experiment file; False when the caller saves the data.
         self.auto_save = config.output.auto_save if auto_save is None else auto_save
         self.on_transient = on_transient
+        self.on_data = on_data
+        self.data_interval_s = data_interval_s
         self.sequence: CompiledSequence = compile_experiment(config)
         self._abort = threading.Event()
 
@@ -80,8 +82,7 @@ class ExperimentRunner:
 
     @property
     def expected_points(self) -> int:
-        hw = self.config.hardware_parameters
-        return int(round(hw.acq_sample_rate_hz * hw.acq_duration_ms / 1000))
+        return self.config.acquisition.number_of_samples
 
     def abort(self) -> None:
         """Request a stop; safe to call from another thread (e.g. a GUI button)."""
@@ -133,8 +134,11 @@ class ExperimentRunner:
         expected = self.expected_points
         deadline = time.monotonic() + self._max_duration_s()
         blocks: list[np.ndarray] = []
+        pending = b""  # a frame may be split between two chunks
         received = 0
         done = False
+        columns = [ch - 1 for ch in self.config.acquisition.channels]
+        last_data = 0.0
 
         while received < expected:
             self._check_abort()
@@ -144,11 +148,17 @@ class ExperimentRunner:
                 )
             chunk = self.spec.acquisition.fetch_chunk(self.is_valid_chunk)
             if chunk:
-                samples = self.decode(chunk)
+                pending += chunk
+                whole = len(pending) - len(pending) % FRAME_DTYPE.itemsize
+                samples = self.decode(pending[:whole])
+                pending = pending[whole:]
                 blocks.append(samples)
                 received += len(samples)
                 if self.on_progress:
                     self.on_progress(index, received, expected)
+                if self.on_data and blocks and time.monotonic() - last_data >= self.data_interval_s:
+                    last_data = time.monotonic()
+                    self.on_data(index, np.concatenate(blocks)[:expected, columns])
                 continue
             # Buffer empty: finished, or the device has not produced more yet.
             if done:
@@ -158,12 +168,16 @@ class ExperimentRunner:
             if not done:
                 time.sleep(self.poll_s)
 
-        data = np.concatenate(blocks) if blocks else np.empty(0)
-        return data[:expected]
+        if not blocks:
+            return np.empty((0, len(self.config.acquisition.channels)))
+        # Keep only the channels selected in the experiment file (columns in channel order).
+        return np.concatenate(blocks)[:expected, columns]
 
     def _max_duration_s(self) -> float:
         last_event_ms = max((e.time_ms for e in self.config.events), default=0)
-        return (last_event_ms + self.config.hardware_parameters.acq_duration_ms) / 1000 + self.timeout_margin_s
+        acq = self.config.acquisition
+        acquisition_s = acq.start_us / 1e6 + acq.duration_s(self.config.hardware_parameters.acq_sample_rate_hz)
+        return last_event_ms / 1000 + acquisition_s + self.timeout_margin_s
 
     def _check_abort(self) -> None:
         if self._abort.is_set():
@@ -181,14 +195,19 @@ class ExperimentRunner:
         return path
 
     def _save_csv(self, name: str, data: np.ndarray) -> Path:
-        return save_csv(self.output_dir / name, data, self.config.hardware_parameters.acq_sample_rate_hz)
+        return save_csv(self.output_dir / name, data, self.config.hardware_parameters.acq_sample_rate_hz,
+                        self.config.acquisition.channels)
 
 
-def save_csv(path: Path, data: np.ndarray, sample_rate_hz: float) -> Path:
-    """Save samples with a time column: time_s,signal (or ch1, ch2... for 2-D data)."""
+def save_csv(path: Path, data: np.ndarray, sample_rate_hz: float, channels: tuple[int, ...] | None = None) -> Path:
+    """Save samples with a time column: time_s,ch1,ch3,... (channels names the columns of 2-D data)."""
     t = np.arange(len(data)) / sample_rate_hz
     columns = data.reshape(len(data), -1)
-    signal_names = ["signal"] if columns.shape[1] == 1 else [f"ch{i + 1}" for i in range(columns.shape[1])]
+    if channels is None:
+        channels = tuple(range(1, columns.shape[1] + 1))
+    if len(channels) != columns.shape[1]:
+        raise ValueError(f"{columns.shape[1]} data column(s) but {len(channels)} channel name(s)")
+    signal_names = [f"ch{ch}" for ch in channels]
     np.savetxt(
         path,
         np.column_stack([t, columns]),

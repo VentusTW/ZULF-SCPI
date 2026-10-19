@@ -12,5 +12,12 @@
   },
   "directories": {
     "data_output": "data/results/"
+  },
+  "event_durations_ms": {
+    ":MOTor:MOVE": 1500,
+    ":SHIM:CURRent": 5,
+    ":DIGital:STATe": 1,
+    ":AWG:RST": 1,
+    ":ACQuire:RUN": 0
   }
 }

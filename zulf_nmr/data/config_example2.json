@@ -12,9 +12,12 @@
     "auto_save": true
   },
   "hardware_parameters": {
-    "acq_sample_rate_hz": 1000,
-    "acq_duration_ms": 60000,
-    "acq_start_awg_time": 50
+    "acq_sample_rate_hz": 1000
+  },
+  "acquisition": {
+    "start": 50,
+    "number_of_samples": 60000,
+    "channels": [1, 2]
   },
   "events": [
     {

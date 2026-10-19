@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from zulf_nmr.core.scpi import header_matches, short_form
 from zulf_nmr.experiment.parser import ExperimentConfig
-from zulf_nmr.hardware.acquisition import Acquisition
+from zulf_nmr.hardware.acquisition import Acquisition, duration_for_samples
 from zulf_nmr.hardware.sequencer import ALLOWED_EVENTS, Sequencer
 
 
@@ -60,6 +60,25 @@ def canonical_event(action: str) -> str:
     return f"{header} {','.join(args)}" if args else header
 
 
+def acquisition_window_ms(config: ExperimentConfig) -> tuple[float, float] | None:
+    """(start, end) of the acquisition in ms of the sequence, None if nothing triggers it.
+
+    acquisition.start counts from the first :AWG:RUN event (:ACQuire:AUTostart);
+    without :AWG:RUN a :ACQuire:RUN event starts the recording at once.
+    """
+    acq = config.acquisition
+    duration_ms = acq.duration_s(config.hardware_parameters.acq_sample_rate_hz) * 1000
+    for event in config.events:  # sorted by time
+        header = event.action.strip().split(" ", 1)[0]
+        if header_matches(header, ":AWG:RUN"):
+            start = event.time_ms + acq.start_us / 1000
+            return start, start + duration_ms
+    for event in config.events:
+        if header_matches(event.action.strip().split(" ", 1)[0], ":ACQuire:RUN"):
+            return event.time_ms, event.time_ms + duration_ms
+    return None
+
+
 def compile_experiment(config: ExperimentConfig) -> CompiledSequence:
     """Convert a validated experiment into the SCPI commands that run it.
 
@@ -67,6 +86,7 @@ def compile_experiment(config: ExperimentConfig) -> CompiledSequence:
     is not defined.
     """
     hw = config.hardware_parameters
+    acq = config.acquisition
 
     rec = _RecordingConnection()
     acquisition = Acquisition(rec)
@@ -74,9 +94,10 @@ def compile_experiment(config: ExperimentConfig) -> CompiledSequence:
 
     sequencer.reset()
     acquisition.set_sample_rate(hw.acq_sample_rate_hz)
-    acquisition.set_duration(hw.acq_duration_ms)
-    # ASSUMED: acq_start_awg_time is in us, the unit of :ACQuire:AUTostart.
-    acquisition.set_autostart(int(round(hw.acq_start_awg_time)), enable=True)
+    # The device takes a duration in ms; it is rounded up so that at least
+    # number_of_samples are recorded (the runner keeps exactly that many).
+    acquisition.set_duration(duration_for_samples(acq.number_of_samples, hw.acq_sample_rate_hz))
+    acquisition.set_autostart(acq.start_us, enable=True)  # us after :AWG:RUN
     setup = tuple(rec.commands)
 
     rec.commands.clear()

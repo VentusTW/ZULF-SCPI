@@ -178,8 +178,14 @@ class QueueEditor(tk.Toplevel):
                 self._details.insert(
                     "end",
                     f"Experiment: {cfg.experiment_name}, {len(cfg.events)} events, "
-                    f"{cfg.output.average_count} transient(s), "
-                    f"acquisition {cfg.hardware_parameters.acq_duration_ms} ms\n",
+                    f"{cfg.output.average_count} transient(s)\n",
+                )
+                acq, rate = cfg.acquisition, cfg.hardware_parameters.acq_sample_rate_hz
+                self._details.insert(
+                    "end",
+                    f"Acquisition: {acq.number_of_samples} samples at {rate:g} Hz "
+                    f"({acq.duration_s(rate):g} s), starts {acq.start_us} us after :AWG:RUN, "
+                    f"channels {', '.join(map(str, acq.channels))}\n",
                 )
                 if item.awg is not None:
                     self._details.insert(

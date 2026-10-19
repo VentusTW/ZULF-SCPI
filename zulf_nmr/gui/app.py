@@ -11,11 +11,14 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, ttk
 from tkinter.scrolledtext import ScrolledText
+from typing import Any
 
+import numpy as np
 from matplotlib.figure import Figure
 from serial.tools import list_ports
 
 from zulf_nmr.core.connection import APP_DIR, DEFAULT_SYSTEM_CONFIG, Message, SCPIConnection
+from zulf_nmr.core.scpi import header_matches
 from zulf_nmr.core.spectrometer import Spectrometer
 from zulf_nmr.experiment.parser import (
     ConfigError,
@@ -25,12 +28,13 @@ from zulf_nmr.experiment.parser import (
     load_system_config,
 )
 from zulf_nmr.experiment.runner import ExperimentAborted
-from zulf_nmr.experiment.schedule import QueueItem, QueueRunner, format_delay
+from zulf_nmr.experiment.sequence import acquisition_window_ms
+from zulf_nmr.experiment.schedule import QueueItem, QueueRunner, ResultGroup, Transient, format_delay
 from zulf_nmr.gui.preview import PlotPreview
 from zulf_nmr.gui.queue_editor import QueueEditor
 from zulf_nmr.gui.results_viewer import ResultsViewer
 from zulf_nmr.utils.visualization.awg_plotter import plot_awg
-from zulf_nmr.utils.visualization.events_plotter import plot_events
+from zulf_nmr.utils.visualization.events_plotter import AcquisitionWindow, plot_events
 
 log = logging.getLogger(__name__)
 
@@ -67,7 +71,8 @@ class App(tk.Tk):
         self.geometry("820x560")
         self.minsize(640, 400)
 
-        self._incoming: queue.Queue[tuple[str, str]] = queue.Queue()
+        # (tag, payload) from worker threads; payload is text, or a tuple for "progress" and "result"
+        self._incoming: queue.Queue[tuple[str, Any]] = queue.Queue()
         self._outgoing: queue.Queue[tuple[SCPIConnection, str]] = queue.Queue()
         threading.Thread(target=self._send_worker, name="SCPI sender", daemon=True).start()
         self._connection: SCPIConnection | None = None
@@ -77,6 +82,8 @@ class App(tk.Tk):
         self._queue: list[QueueItem] = []
         self._queue_accepted = False
         self._runner: QueueRunner | None = None
+        self._viewer: ResultsViewer | None = None  # live results of the current run
+        self._transients_done = 0
 
         self._system, source = load_system_settings()
         self._settings = self._system.connection
@@ -137,8 +144,10 @@ class App(tk.Tk):
         ttk.Checkbutton(run_bar, text="Simulation", variable=self._simulate,
                         command=self._update_run_button).pack(side="right", padx=(0, 8))
         self._run_btn.pack(side="right")
+        self._progress_bar = ttk.Progressbar(run_bar, length=180, mode="determinate")
+        self._progress_bar.pack(side="right", padx=(8, 8))
         self._progress_label = ttk.Label(run_bar, text="")
-        self._progress_label.pack(side="right", padx=8)
+        self._progress_label.pack(side="right")
 
         self._console = ScrolledText(self, state="disabled", font=("Consolas", 10), wrap="word")
         self._console.pack(fill="both", expand=True, padx=8)
@@ -335,15 +344,33 @@ class App(tk.Tk):
     def _review(self, item: QueueItem, index: int, total: int) -> bool:
         """Show the event timeline (and the AWG channels below it) of one set; True if accepted."""
         config, awg = item.config, item.awg
-        events_height = max(4.0, 0.45 * len(config.events) + 2)
+        # Bars: configured event durations; :AWG:RUN lasts as long as the AWG sequence.
+        durations = [
+            awg.duration_s * 1000 if awg is not None and header_matches(e.action.strip().split(" ", 1)[0], ":AWG:RUN")
+            else self._system.event_duration_ms(e.action)
+            for e in config.events
+        ]
+        window = acquisition_window_ms(config)
+        channels = config.acquisition.channels
+        timeline_acq = AcquisitionWindow(window[0], window[1], channels) if window else None
+        rows = len(config.events) + (1 if timeline_acq else 0)
+        events_height = max(4.0, 0.45 * rows + 2)
+
+        def timeline(ax):
+            plot_events(config.events, title=config.experiment_name, ax=ax,
+                        durations_ms=durations, acquisition=timeline_acq)
+
         if awg is None:
             fig = Figure(figsize=(10, events_height), layout="constrained")
-            plot_events(config.events, title=config.experiment_name, ax=fig.add_subplot())
+            timeline(fig.add_subplot())
         else:
             fig = Figure(figsize=(10, events_height + 6), layout="constrained")
             top, bottom = fig.subfigures(2, 1, height_ratios=[events_height, 6])
-            plot_events(config.events, title=config.experiment_name, ax=top.add_subplot())
-            plot_awg(awg, fig=bottom)
+            timeline(top.add_subplot())
+            acq = config.acquisition
+            end_ms = (acq.start_us / 1000
+                      + acq.duration_s(config.hardware_parameters.acq_sample_rate_hz) * 1000)
+            plot_awg(awg, fig=bottom, acquisition=(acq.start_us / 1000, end_ms, channels))
         if index < total:
             hint = f"Set {index}/{total}. Next set starts {format_delay(item.delay_s)} after this one ends."
         else:
@@ -389,11 +416,20 @@ class App(tk.Tk):
             self._runner = QueueRunner(
                 spec, self._queue, self._ensure_results_dir(), simulate=simulate,
                 on_status=lambda text: self._incoming.put(("status", text)),
-                on_progress=self._on_progress,
+                on_progress=lambda *args: self._incoming.put(("progress", args)),
+                # The worker may already be on the next transient when the GUI draws this one,
+                # so the average and its count are taken now, in the worker thread.
+                on_result=lambda group, transient: self._incoming.put(
+                    ("result", (group, transient, group.average, len(group.transients)))),
+                on_live=lambda group, number, data: self._incoming.put(("live", (group, number, data))),
             )
         except (ValueError, OSError) as e:
             self._log("error", f"Cannot start the queue: {e}")
             return
+        # One step per transient of every set; a running transient adds its share of points.
+        self._transients_done = 0
+        self._progress_bar.config(maximum=sum(i.config.output.average_count for i in self._queue), value=0)
+        self._viewer = None
         mode = " - SIMULATION" if simulate else ""
         self._log("info", f"Starting the queue ({len(self._queue)} set(s)){mode}")
         self._update_run_button()
@@ -403,23 +439,50 @@ class App(tk.Tk):
         try:
             runner.run()
         except ExperimentAborted:
-            self._incoming.put(("error", "Queue aborted" + ("" if runner.simulate else " - *RST sent")))
+            outcome = "Queue aborted" + ("" if runner.simulate else " - *RST sent")
+            self._incoming.put(("error", outcome))
         except Exception as e:
-            self._incoming.put(("error", f"Queue failed: {e}"))
+            outcome = f"Queue failed: {e}"
+            self._incoming.put(("error", outcome))
         else:
-            self._incoming.put(("info", f"Queue finished ({len(runner.items)} set(s))"))
+            outcome = f"Queue finished ({len(runner.items)} set(s))"
+            self._incoming.put(("info", outcome))
         result = runner.result
         if result is not None:
             self._incoming.put(("info", f"Results in {result.folder}"))
             for path in result.files:
                 self._incoming.put(("info", f"   {path.name}"))
-        self._incoming.put(("finished", ""))
+        self._incoming.put(("finished", outcome))
 
-    def _on_progress(self, set_index: int, transient: int, received: int, expected: int) -> None:
-        item = self._queue[set_index - 1]
-        total = item.config.output.average_count
-        self._incoming.put(("progress", f"Set {set_index}/{len(self._queue)}, transient {transient}/{total}: "
-                                        f"{received}/{expected} points"))
+    def _show_progress(self, set_index: int, transient: int, received: int, expected: int) -> None:
+        """Points of the running transient (only reported when the device is used)."""
+        total = self._queue[set_index - 1].config.output.average_count
+        self._progress_label.config(text=f"Set {set_index}/{len(self._queue)}, transient {transient}/{total}: "
+                                         f"{received}/{expected} points")
+        self._progress_bar.config(value=self._transients_done + (received / expected if expected else 0))
+
+    def _results_window(self, group: ResultGroup) -> ResultsViewer | None:
+        """The live results window: opened with the first data, not reopened if the user closed it."""
+        if self._viewer is None:
+            self._viewer = ResultsViewer(self, group.config_file.parent)
+        return self._viewer if self._viewer.winfo_exists() else None
+
+    def _show_live(self, group: ResultGroup, number: int, data: np.ndarray) -> None:
+        viewer = self._results_window(group)
+        if viewer is not None:
+            total = self._queue[group.set_index - 1].config.acquisition.number_of_samples
+            viewer.show_live(group, number, data, total)
+
+    def _show_result(self, group: ResultGroup, transient: Transient, average: np.ndarray, count: int) -> None:
+        """A transient was saved: advance the progress bar and add it to the live results window."""
+        self._transients_done += 1
+        self._progress_bar.config(value=self._transients_done)
+        self._progress_label.config(
+            text=f"Set {group.set_index}/{len(self._queue)}: transient {transient.number}/"
+                 f"{group.expected_transients} done")
+        viewer = self._results_window(group)
+        if viewer is not None:
+            viewer.add_transient(group, transient, average, count)
 
     # --------------------------------------------------------------- results
 
@@ -452,25 +515,34 @@ class App(tk.Tk):
         self._console.config(state="disabled")
 
     def _drain_log(self) -> None:
+        live = None  # only the newest live data is drawn - older parts are already outdated
         while True:
             try:
                 tag, text = self._incoming.get_nowait()
             except queue.Empty:
                 break
-            if tag == "progress":
-                self._progress_label.config(text=text)
+            if tag == "live":
+                live = text
+            elif tag == "progress":
+                self._show_progress(*text)
+            elif tag == "result":
+                group, transient = text[0], text[1]
+                if live is not None and (live[0].set_index, live[1]) == (group.set_index, transient.number):
+                    live = None  # the complete transient replaces it
+                self._show_result(*text)
             elif tag == "status":
                 self._progress_label.config(text=text)
                 self._log("info", text)
             elif tag == "finished":
-                result = self._runner.result if self._runner else None
-                if result is not None and any(g.transients for g in result.groups):
-                    ResultsViewer(self, result)
                 self._runner = None
-                self._progress_label.config(text="")
+                self._progress_label.config(text=text)
+                if self._viewer is not None and self._viewer.winfo_exists():
+                    self._viewer.set_status(text)
                 self._update_run_button()
             else:
                 self._log(tag, text)
+        if live is not None:
+            self._show_live(*live)
         self.after(_LOG_POLL_MS, self._drain_log)
 
     def _on_close(self) -> None:

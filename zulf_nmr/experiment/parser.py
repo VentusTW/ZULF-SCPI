@@ -10,6 +10,7 @@ from typing import Any
 
 from zulf_nmr.core.connection import DEFAULT_SYSTEM_CONFIG
 from zulf_nmr.core.scpi import header_matches
+from zulf_nmr.hardware.acquisition import ADC_CHANNELS
 from zulf_nmr.hardware.digital import Digital
 from zulf_nmr.hardware.motor import MotorPosition
 from zulf_nmr.hardware.sequencer import ALLOWED_EVENTS
@@ -48,12 +49,34 @@ class ConnectionSettings:
     timeout_s: float = 2.0
 
 
+# How long each kind of sequence event keeps the device busy, in ms - shown as
+# bars on the event timeline. Placeholder values; they are expected to move to
+# the device's EEPROM. :AWG:RUN lasts as long as the loaded AWG sequence.
+DEFAULT_EVENT_DURATIONS_MS: dict[str, float] = {
+    ":MOTor:MOVE": 1500.0,
+    ":SHIM:CURRent": 5.0,
+    ":DIGital:STATe": 1.0,
+    ":AWG:RST": 1.0,
+    ":ACQuire:RUN": 0.0,
+}
+
+
 @dataclass(frozen=True)
 class SystemConfig:
     connection: ConnectionSettings
     hardware_limits: HardwareLimits
     data_output: Path
     source_path: Path | None = None
+    # Keyed by the ALLOWED_EVENTS header as written there, e.g. ":MOTor:MOVE".
+    event_durations_ms: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_EVENT_DURATIONS_MS))
+
+    def event_duration_ms(self, action: str) -> float | None:
+        """Duration of a sequence event (e.g. ':SHIM:CURR 1, 10.5'), None if not configured."""
+        header = action.strip().split(" ", 1)[0]
+        for pattern, duration in self.event_durations_ms.items():
+            if header_matches(header, pattern):
+                return duration
+        return None
 
 
 @dataclass(frozen=True)
@@ -66,8 +89,16 @@ class OutputSettings:
 @dataclass(frozen=True)
 class HardwareParameters:
     acq_sample_rate_hz: float
-    acq_duration_ms: int
-    acq_start_awg_time: float  # unit not defined yet (:ACQuire:AUTostart uses us)
+
+
+@dataclass(frozen=True)
+class AcquisitionSettings:
+    start_us: int  # start of the acquisition after :AWG:RUN (:ACQuire:AUTostart)
+    number_of_samples: int  # samples recorded per channel
+    channels: tuple[int, ...]  # ADC channels recorded, saved and shown, ascending
+
+    def duration_s(self, sample_rate_hz: float) -> float:
+        return self.number_of_samples / sample_rate_hz
 
 
 @dataclass(frozen=True)
@@ -88,6 +119,7 @@ class ExperimentConfig:
     metadata: dict[str, Any]
     output: OutputSettings
     hardware_parameters: HardwareParameters
+    acquisition: AcquisitionSettings
     events: tuple[Event, ...]  # sorted by time_ms (stable)
     awg_sequence: AwgSequence | None
     source_path: Path | None = None
@@ -103,7 +135,8 @@ def load_system_config(path: str | Path = DEFAULT_SYSTEM_CONFIG) -> SystemConfig
     v = _Validator()
     data = _read_json(path)
 
-    v.check_keys(data, "", required={"connection"}, optional={"hardware_limits", "directories"})
+    v.check_keys(data, "", required={"connection"},
+                 optional={"hardware_limits", "directories", "event_durations_ms"})
 
     conn = v.section(data, "connection")
     v.check_keys(conn, "connection", required={"port"}, optional={"baudrate", "timeout_s"})
@@ -127,8 +160,16 @@ def load_system_config(path: str | Path = DEFAULT_SYSTEM_CONFIG) -> SystemConfig
     v.check_keys(dirs, "directories", optional={"data_output"})
     data_output = v.string(dirs, "data_output", "directories", default="data/")
 
+    durations = dict(DEFAULT_EVENT_DURATIONS_MS)
+    for key, value in v.section(data, "event_durations_ms").items():
+        pattern = next((p for p in ALLOWED_EVENTS if header_matches(key, p)), None)
+        if pattern is None:
+            v.error(f"event_durations_ms.{key}", f"not a sequence event; use one of {', '.join(ALLOWED_EVENTS)}")
+            continue
+        durations[pattern] = v.number({key: value}, key, "event_durations_ms", minimum=0)
+
     v.raise_if_errors(path)
-    return SystemConfig(connection, limits, Path(data_output), source_path=path)
+    return SystemConfig(connection, limits, Path(data_output), source_path=path, event_durations_ms=durations)
 
 
 def load_experiment_config(
@@ -161,7 +202,7 @@ def parse_experiment(
     v.check_keys(
         data,
         "",
-        required={"experiment_name", "hardware_parameters", "events"},
+        required={"experiment_name", "hardware_parameters", "acquisition", "events"},
         optional={"metadata", "output", "awg_sequence"},
     )
 
@@ -180,15 +221,27 @@ def parse_experiment(
     )
 
     hw = v.section(data, "hardware_parameters")
+    for old, new in (("acq_duration_ms", "acquisition.number_of_samples"),
+                     ("acq_start_awg_time", "acquisition.start")):
+        if old in hw:
+            v.error(f"hardware_parameters.{old}", f"no longer used - set {new} instead")
     v.check_keys(
         hw,
         "hardware_parameters",
-        required={"acq_sample_rate_hz", "acq_duration_ms", "acq_start_awg_time"},
+        required={"acq_sample_rate_hz"},
+        optional={"acq_duration_ms", "acq_start_awg_time"},  # reported above
     )
     hardware = HardwareParameters(
         acq_sample_rate_hz=v.number(hw, "acq_sample_rate_hz", "hardware_parameters", positive=True),
-        acq_duration_ms=v.integer(hw, "acq_duration_ms", "hardware_parameters", minimum=1),
-        acq_start_awg_time=v.number(hw, "acq_start_awg_time", "hardware_parameters", minimum=0),
+    )
+
+    acq = v.section(data, "acquisition")
+    if "acquisition" in data:  # a missing section is reported once, by the top-level check
+        v.check_keys(acq, "acquisition", required={"start", "number_of_samples", "channels"})
+    acquisition = AcquisitionSettings(
+        start_us=v.integer(acq, "start", "acquisition", minimum=0),
+        number_of_samples=v.integer(acq, "number_of_samples", "acquisition", minimum=1),
+        channels=v.channels(acq, "channels", "acquisition", ADC_CHANNELS),
     )
 
     events = []
@@ -208,6 +261,11 @@ def parse_experiment(
                 v.error(f"{where}.action", f"{action!r}: {problem}")
         events.append(Event(time_ms, action))
     events.sort(key=lambda e: e.time_ms)
+    # acquisition.start counts from :AWG:RUN, so without it nothing would be recorded.
+    starts = (":AWG:RUN", ":ACQuire:RUN")
+    if events and not any(header_matches(e.action.strip().split(" ", 1)[0], h) for e in events for h in starts):
+        v.error("events", "no :AWG:RUN event - the acquisition (acquisition.start) is timed from it, "
+                          "so nothing would be recorded")
 
     awg_sequence = None
     awg = data.get("awg_sequence")
@@ -228,6 +286,7 @@ def parse_experiment(
         metadata=dict(metadata),
         output=output,
         hardware_parameters=hardware,
+        acquisition=acquisition,
         events=tuple(events),
         awg_sequence=awg_sequence,
         source_path=source_path,
@@ -390,6 +449,27 @@ class _Validator:
             self.error(self._join(where, key), f"must be true or false, got {value!r}")
             return False
         return value
+
+    def channels(self, d, key, where, allowed) -> tuple[int, ...]:
+        """Non-empty list of distinct channel numbers from allowed, returned sorted."""
+        value = d.get(key, _MISSING)
+        if value is _MISSING:
+            return ()
+        allowed_text = ", ".join(map(str, allowed))
+        if (
+            not isinstance(value, list)
+            or not value
+            or any(isinstance(c, bool) or not isinstance(c, int) for c in value)
+        ):
+            self.error(self._join(where, key), f"must be a non-empty list of channel numbers ({allowed_text}), "
+                                               f"got {value!r}")
+            return ()
+        bad = [c for c in value if c not in allowed]
+        if bad:
+            self.error(self._join(where, key), f"no channel(s) {bad}; the ADC has channels {allowed_text}")
+        if len(set(value)) != len(value):
+            self.error(self._join(where, key), f"channels must not repeat, got {value}")
+        return tuple(sorted(set(c for c in value if c in allowed)))
 
     def choice(self, d, key, where, choices, default=_MISSING) -> str:
         value = self.string(d, key, where, default)
