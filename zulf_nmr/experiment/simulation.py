@@ -31,8 +31,3 @@ def simulate_transient(config: ExperimentConfig, rng: np.random.Generator | None
     signal *= np.exp(-t / T2_S)
     return signal + rng.normal(0.0, NOISE_RMS, n)
 
-
-def simulate_set(config: ExperimentConfig, rng: np.random.Generator | None = None) -> np.ndarray:
-    """Data of one set: the mean of output.average_count simulated transients."""
-    rng = rng or np.random.default_rng()
-    return np.mean([simulate_transient(config, rng) for _ in range(config.output.average_count)], axis=0)

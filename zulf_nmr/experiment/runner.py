@@ -57,8 +57,10 @@ class ExperimentRunner:
         on_progress: Callable[[int, int, int], None] | None = None,
         awg_waveform: AwgWaveform | None = None,
         auto_save: bool | None = None,
+        on_transient: Callable[[int, np.ndarray], None] | None = None,
     ) -> None:
-        """on_progress(transient, points_received, points_expected) is called after every chunk."""
+        """on_progress(transient, points_received, points_expected) is called after every chunk,
+        on_transient(transient, data) after every complete transient."""
         self.spec = spectrometer
         self.config = config
         self.output_dir = Path(output_dir) if output_dir is not None else spectrometer.data_output
@@ -70,6 +72,7 @@ class ExperimentRunner:
         self.awg_waveform = awg_waveform
         # None = output.auto_save from the experiment file; False when the caller saves the data.
         self.auto_save = config.output.auto_save if auto_save is None else auto_save
+        self.on_transient = on_transient
         self.sequence: CompiledSequence = compile_experiment(config)
         self._abort = threading.Event()
 
@@ -103,6 +106,8 @@ class ExperimentRunner:
                 data = self._run_transient(i)
                 result.transients.append(data)
                 result.average = average(result.transients)
+                if self.on_transient:
+                    self.on_transient(i, data)
                 if self.auto_save:
                     result.files.append(self._save_csv(f"{prefix}_transient_{i:03d}.csv", data))
                     avg_path = self._save_csv(f"{prefix}_average.csv", result.average)

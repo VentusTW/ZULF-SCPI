@@ -1,4 +1,4 @@
-"""Plots the results of a queue run: for every configuration its transients, then its average."""
+"""Plots the results of a queue run: for every set its transients, then their average."""
 
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ def result_rows(result: QueueResult) -> int:
 
 
 def plot_results(result: QueueResult, fig: Figure | None = None) -> Figure:
-    """One row per trace, top to bottom: group 1 transients, group 1 average, group 2..."""
+    """One row per trace, top to bottom: set 1 transients, set 1 average, set 2..."""
     rows = result_rows(result)
     if fig is None:
         fig = Figure(figsize=(11, ROW_HEIGHT_IN * max(rows, 1) + 0.6), layout="constrained")
@@ -31,11 +31,12 @@ def plot_results(result: QueueResult, fig: Figure | None = None) -> Figure:
     for group in result.groups:
         if not group.transients:
             continue
-        traces = [(f"Transient {t.number:03d} (queue set {t.set_index}) — {t.file.name}", t.data, TRANSIENT_COLOUR)
+        traces = [(f"Set {group.set_index}: transient {t.number:03d} — {t.file.name}", t.data, TRANSIENT_COLOUR)
                   for t in group.transients]
-        numbers = ", ".join(f"{t.number:03d}" for t in group.transients)
-        traces.append((f"Average of transient(s) {numbers} — {group.average_file.name}", group.average,
-                       AVERAGE_COLOUR))
+        done = len(group.transients)
+        of = f" (aborted: {done} of {group.expected_transients})" if done < group.expected_transients else ""
+        traces.append((f"Set {group.set_index}: average of {done} transient(s){of} — {group.average_file.name}",
+                       group.average, AVERAGE_COLOUR))
         for title, data, colour in traces:
             ax = axes[row]
             step = max(1, len(data) // _MAX_POINTS)
