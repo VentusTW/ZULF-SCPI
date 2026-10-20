@@ -142,6 +142,14 @@ class ResultsViewer(tk.Toplevel):
         # Nearly the whole screen; the rows take the full width of the window.
         self.geometry(f"{self.winfo_screenwidth() - 80}x{self.winfo_screenheight() - 120}+40+20")
 
+        # Bottom edge: progress of the whole queue, the same as in the main window.
+        progress = ttk.Frame(self, padding=(8, 0, 8, 8))
+        progress.pack(side="bottom", fill="x")
+        self._progress_text = ttk.Label(progress, text="", width=48)
+        self._progress_text.pack(side="left")
+        self._progress = ttk.Progressbar(progress, mode="determinate")
+        self._progress.pack(side="left", fill="x", expand=True, padx=(8, 0))
+
         bottom = ttk.Frame(self, padding=8)
         bottom.pack(side="bottom", fill="x")
         self._status = ttk.Label(bottom, text=str(folder))
@@ -198,6 +206,10 @@ class ResultsViewer(tk.Toplevel):
 
     def set_status(self, text: str) -> None:
         self._status.config(text=text)
+
+    def set_progress(self, value: float, maximum: float, text: str) -> None:
+        self._progress.config(maximum=maximum, value=value)
+        self._progress_text.config(text=text)
 
     # ---------------------------------------------------------------- helpers
 

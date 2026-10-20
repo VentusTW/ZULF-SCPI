@@ -454,12 +454,21 @@ class App(tk.Tk):
                 self._incoming.put(("info", f"   {path.name}"))
         self._incoming.put(("finished", outcome))
 
+    def _set_progress(self, text: str, value: float | None = None) -> None:
+        """Progress bar and text in the main window and at the bottom of the results window."""
+        if value is not None:
+            self._progress_bar.config(value=value)
+        self._progress_label.config(text=text)
+        if self._viewer is not None and self._viewer.winfo_exists():
+            self._viewer.set_progress(float(self._progress_bar["value"]),
+                                      float(self._progress_bar["maximum"]), text)
+
     def _show_progress(self, set_index: int, transient: int, received: int, expected: int) -> None:
-        """Points of the running transient (only reported when the device is used)."""
+        """Samples of the running transient received so far."""
         total = self._queue[set_index - 1].config.output.average_count
-        self._progress_label.config(text=f"Set {set_index}/{len(self._queue)}, transient {transient}/{total}: "
-                                         f"{received}/{expected} points")
-        self._progress_bar.config(value=self._transients_done + (received / expected if expected else 0))
+        self._set_progress(f"Set {set_index}/{len(self._queue)}, transient {transient}/{total}: "
+                           f"{received}/{expected} samples",
+                           self._transients_done + (received / expected if expected else 0))
 
     def _results_window(self, group: ResultGroup) -> ResultsViewer | None:
         """The live results window: opened with the first data, not reopened if the user closed it."""
@@ -476,11 +485,9 @@ class App(tk.Tk):
     def _show_result(self, group: ResultGroup, transient: Transient, average: np.ndarray, count: int) -> None:
         """A transient was saved: advance the progress bar and add it to the live results window."""
         self._transients_done += 1
-        self._progress_bar.config(value=self._transients_done)
-        self._progress_label.config(
-            text=f"Set {group.set_index}/{len(self._queue)}: transient {transient.number}/"
-                 f"{group.expected_transients} done")
         viewer = self._results_window(group)
+        self._set_progress(f"Set {group.set_index}/{len(self._queue)}: transient {transient.number}/"
+                           f"{group.expected_transients} done", self._transients_done)
         if viewer is not None:
             viewer.add_transient(group, transient, average, count)
 
@@ -531,11 +538,11 @@ class App(tk.Tk):
                     live = None  # the complete transient replaces it
                 self._show_result(*text)
             elif tag == "status":
-                self._progress_label.config(text=text)
+                self._set_progress(text)
                 self._log("info", text)
             elif tag == "finished":
                 self._runner = None
-                self._progress_label.config(text=text)
+                self._set_progress(text)
                 if self._viewer is not None and self._viewer.winfo_exists():
                     self._viewer.set_status(text)
                 self._update_run_button()
