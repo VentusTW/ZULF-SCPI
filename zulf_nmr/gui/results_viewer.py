@@ -28,7 +28,8 @@ class TraceRow:
     Drag on the time plot to choose the range of the spectrum; drag the selection to move it;
     a click (left, without dragging, or right) removes it - the spectrum is then of the whole trace.
     A row of a transient that is still being received follows its newest samples
-    until the user zooms or moves it.
+    until the user zooms or moves it. The header above the plots names the trace;
+    its +/- button hides or shows the plots.
     """
 
     def __init__(self, master: tk.Misc, sample_rate_hz: float, channels: tuple[int, ...], average: bool,
@@ -44,10 +45,25 @@ class TraceRow:
         self.view: tuple[float, float] | None = None  # (start, width) in s; None = not set by the user
         self.on_scroll = on_scroll  # wheel without a modifier scrolls the list of rows
 
+        # frame = header (toggle button + name) above the plots; the frame is what is packed.
+        self.frame = ttk.Frame(master)
+        header = ttk.Frame(self.frame)
+        header.pack(side="top", fill="x", pady=(4, 0))
+        self._toggle = ttk.Button(header, text="\u2212", width=3, command=self.toggle)
+        self._toggle.pack(side="left")
+        self._name = ttk.Label(header, text="", font=("Segoe UI", 9, "bold" if average else "normal"),
+                               cursor="hand2")
+        self._name.pack(side="left", padx=6)
+        self._name.bind("<Button-1>", lambda _e: self.toggle())
+        for w in (header, self._toggle, self._name):
+            w.bind("<MouseWheel>", lambda e: self.on_scroll and self.on_scroll(e.delta / 120))
+        self.expanded = True
+
         self.figure = Figure(figsize=ROW_SIZE_IN, layout="constrained")
         self.ax_time, self.ax_spec = self.figure.subplots(1, 2, width_ratios=[3, 2])
-        self.canvas = FigureCanvasTkAgg(self.figure, master=master)
+        self.canvas = FigureCanvasTkAgg(self.figure, master=self.frame)
         self.widget = self.canvas.get_tk_widget()
+        self.widget.pack(side="top", anchor="w")
         self.selector: SpanSelector | None = None
         self.canvas.mpl_connect("scroll_event", self._on_scroll)
         self.canvas.mpl_connect("button_press_event", self._on_press)
@@ -56,6 +72,7 @@ class TraceRow:
         """Draw new data (a new trace, or an updated average); the selected range and the
         zoom are kept. live: the trace is still growing - show its newest samples."""
         self.data, self.title = data, title
+        self._name.config(text=title.replace("\n", "  \u2014  "))
         draw_time(self.ax_time, data, self.rate, self.channels, title, self.average, self._xlim(live),
                   self.start_s)
         self._draw_spectrum()
@@ -67,6 +84,20 @@ class TraceRow:
         if self.t_range is not None:
             self.selector.extents = self.t_range
         self.canvas.draw_idle()
+
+    def expand(self, expanded: bool = True) -> None:
+        """Show (or, with expanded=False, hide) the plots; the header stays."""
+        if expanded == self.expanded:
+            return
+        self.expanded = expanded
+        if expanded:
+            self.widget.pack(side="top", anchor="w")
+        else:
+            self.widget.pack_forget()
+        self._toggle.config(text="\u2212" if expanded else "+")
+
+    def toggle(self) -> None:
+        self.expand(not self.expanded)
 
     def _on_select(self, t0: float, t1: float) -> None:
         if t1 - t0 <= 0:  # a click without dragging
@@ -217,7 +248,8 @@ class ResultsViewer(tk.Toplevel):
         n_transients = 0
         for group in result.groups:
             for transient in group.transients:
-                row = self._row(group, transient.number, len(transient.data))
+                # Only the averages are open at first; a transient opens with its + button.
+                row = self._row(group, transient.number, len(transient.data), expanded=False)
                 row.show(transient.data, f"Set {group.set_index}: transient {transient.number:03d} of "
                                          f"{group.expected_transients}\n{transient.file.name}")
             count = len(group.transients)
@@ -237,16 +269,24 @@ class ResultsViewer(tk.Toplevel):
 
     # ---------------------------------------------------------------- helpers
 
-    def _row(self, group: ResultGroup, number: int, total_samples: int) -> TraceRow:
-        """The row of a transient, created (above the set's average, if there is one) when needed."""
+    def _row(self, group: ResultGroup, number: int, total_samples: int, expanded: bool = True) -> TraceRow:
+        """The row of a transient, created (above the set's average, if there is one) when needed.
+
+        A new open row closes the rows of the earlier transients (only their names stay),
+        so while the queue runs just the transient being drawn and the averages are open.
+        """
         key = (group.set_index, number)
         row = self._rows.get(key)
         if row is None:
+            if expanded:
+                for other in self._rows.values():
+                    other.expand(False)
             row = self._rows[key] = TraceRow(self._inner, group.sample_rate_hz, group.channels,
                                              average=False, total_samples=total_samples,
                                              on_scroll=self._scroll, start_s=group.acquisition_start_s)
+            row.expand(expanded)
             average = self._averages.get(group.set_index)
-            self._pack(row, before=average.widget if average else None)
+            self._pack(row, before=average.frame if average else None)
         return row
 
     def _average_row(self, group: ResultGroup, total_samples: int) -> TraceRow:
@@ -278,12 +318,12 @@ class ResultsViewer(tk.Toplevel):
             row.widget.config(width=event.width)
 
     def _pack(self, row: TraceRow, before: tk.Widget | None = None) -> None:
-        # Wheel events over a row arrive through matplotlib (TraceRow._on_scroll).
+        # Wheel events over the plots arrive through matplotlib (TraceRow._on_scroll).
         row.widget.config(width=self._row_px[0], height=self._row_px[1])
         if before is None:
-            row.widget.pack(side="top", anchor="w")
+            row.frame.pack(side="top", fill="x", anchor="w")
         else:
-            row.widget.pack(side="top", anchor="w", before=before)
+            row.frame.pack(side="top", fill="x", anchor="w", before=before)
 
     def _on_wheel(self, event: tk.Event) -> None:
         self._scroll(event.delta / 120)
