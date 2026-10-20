@@ -154,9 +154,6 @@ class ResultsViewer(tk.Toplevel):
         bottom.pack(side="bottom", fill="x")
         ttk.Label(bottom, text=str(folder)).pack(side="left")  # what happens is shown by the progress bar
         ttk.Button(bottom, text="Close", command=self.destroy).pack(side="right")
-        ttk.Label(bottom, text="Time plot: Ctrl + wheel zooms, Shift + wheel moves, "
-                               "drag chooses the range of the spectrum, a click removes it.",
-                  foreground="#666666").pack(side="right", padx=12)
 
         holder = ttk.Frame(self)
         holder.pack(side="top", fill="both", expand=True)
