@@ -83,6 +83,14 @@ class TraceRow:
                   self.start_s)
         self._draw_spectrum()
         # ax.clear() removes the selector's artists, so a new one is made for every redraw.
+        self._new_selector()
+        self.canvas.draw_idle()
+
+    def _new_selector(self) -> None:
+        """A fresh SpanSelector showing t_range, with no drag in progress."""
+        if self.selector is not None:
+            self.selector.disconnect_events()
+            self.selector.set_visible(False)
         self.selector = SpanSelector(
             self.ax_time, self._on_select, "horizontal", useblit=False, interactive=True,
             drag_from_anywhere=True, button=1, grab_range=EDGE_GRAB_PX,
@@ -90,7 +98,6 @@ class TraceRow:
         )
         if self.t_range is not None:
             self.selector.extents = self.t_range
-        self.canvas.draw_idle()
 
     def expand(self, expanded: bool = True) -> None:
         """Show (or, with expanded=False, hide) the plots; the header stays."""
@@ -125,6 +132,12 @@ class TraceRow:
     def _on_press(self, event) -> None:
         if event.button == 3 and event.inaxes is self.ax_time:
             self.clear_selection()
+        elif event.button == 1 and event.dblclick and self._hover_cursor(event) == Cursors.RESIZE_HORIZONTAL:
+            # Double click on an edge: type its position. After matplotlib has finished
+            # with the click, so the SpanSelector does not take the dialog's events.
+            left, right = (self.ax_time.transData.transform((x, 0))[0] for x in self.selector.extents)
+            edge = 0 if abs(event.x - left) <= abs(event.x - right) else 1
+            self.widget.after_idle(self._edit_edge, edge)
         elif event.button == 1:
             # Keep the hover cursor while dragging; the SpanSelector sets its own on press,
             # so it is set again once matplotlib has handled the event.
@@ -144,6 +157,28 @@ class TraceRow:
                 self._set_cursor(self._drag_cursor)
             return
         self._set_cursor(self._hover_cursor(event))
+
+    def _edit_edge(self, edge: int) -> None:
+        """Small window to type the position of an edge (0 = left, 1 = right) of the range."""
+        if self.selector is None or self.t_range is None:
+            return
+        EdgeDialog(self.widget, "Start" if edge == 0 else "End", self.selector.extents, edge,
+                   (self.start_s, max(self.total_s, self.start_s + len(self.data) / self.rate)),
+                   self._apply_range, self._end_edit)
+
+    def _end_edit(self) -> None:
+        """After OK or Cancel: the dialog took the mouse release of the double click, so the
+        selector still believes an edge is being dragged - start a fresh one, not dragging."""
+        self._drag_cursor = None
+        self._new_selector()
+        self._set_cursor(Cursors.POINTER, True)
+        self.canvas.draw_idle()
+
+    def _apply_range(self, t0: float, t1: float) -> None:
+        """Select the range t0..t1 (seconds from the sequence start) for the spectrum."""
+        if self.selector is not None:
+            self.selector.extents = (t0, t1)
+        self._on_select(t0, t1)
 
     def _hover_cursor(self, event) -> Cursors:
         if event.inaxes is self.ax_time and self.t_range is not None and self.selector is not None:
@@ -199,6 +234,62 @@ class TraceRow:
         self.view = (start, width)
         self.ax_time.set_xlim(start, start + width)
         self.canvas.draw_idle()
+
+
+class EdgeDialog(tk.Toplevel):
+    """Entry for the exact position of one edge of the spectrum range, opened at the mouse."""
+
+    def __init__(self, master: tk.Misc, name: str, extents: tuple[float, float], edge: int,
+                 limits: tuple[float, float], on_apply, on_close=None) -> None:
+        super().__init__(master)
+        self._on_close = on_close  # called once the dialog is gone (OK, Cancel, Esc or closed)
+        self.bind("<Destroy>", lambda e: e.widget is self and self._on_close and self._on_close())
+        self.title(f"{name} of the range")
+        self.resizable(False, False)
+        self.transient(master.winfo_toplevel())
+        self._extents, self._edge, self._limits, self._on_apply = extents, edge, limits, on_apply
+
+        frame = ttk.Frame(self, padding=10)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text=f"{name} of the range (s from the sequence start):").grid(
+            row=0, column=0, columnspan=3, sticky="w")
+        self._value = tk.StringVar(value=f"{extents[edge]:.6g}")
+        entry = ttk.Entry(frame, textvariable=self._value, width=14)
+        entry.grid(row=1, column=0, sticky="w", pady=6)
+        ttk.Button(frame, text="OK", command=self._ok).grid(row=1, column=2, sticky="e")
+        ttk.Button(frame, text="Cancel", command=self.destroy).grid(row=1, column=1, sticky="e", padx=6)
+        self._error = ttk.Label(frame, text=f"Allowed: {limits[0]:.6g} - {limits[1]:.6g} s",
+                                foreground="#666666")
+        self._error.grid(row=2, column=0, columnspan=3, sticky="w")
+
+        entry.bind("<Return>", lambda _e: self._ok())
+        self.bind("<Escape>", lambda _e: self.destroy())
+        x, y = self.winfo_pointerxy()
+        self.geometry(f"+{x + 12}+{y + 12}")
+        entry.focus_set()
+        entry.select_range(0, "end")
+        self.grab_set()
+
+    def _ok(self) -> None:
+        text = self._value.get().strip().replace(",", ".")
+        try:
+            value = float(text)
+        except ValueError:
+            return self._fail(f"{text!r} is not a number")
+        low, high = self._limits
+        if not low <= value <= high:
+            return self._fail(f"Must be within {low:.6g} - {high:.6g} s")
+        t0, t1 = self._extents
+        t0, t1 = (value, t1) if self._edge == 0 else (t0, value)
+        if t1 <= t0:
+            other = "end" if self._edge == 0 else "start"
+            return self._fail(f"Must be {'before' if self._edge == 0 else 'after'} the {other} ({self._extents[1 - self._edge]:.6g} s)")
+        self.destroy()
+        self._on_apply(t0, t1)
+
+    def _fail(self, message: str) -> None:
+        self._error.config(text=message, foreground="#d0342c")
+        self.bell()
 
 
 class ResultsViewer(tk.Toplevel):
