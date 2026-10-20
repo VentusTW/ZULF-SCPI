@@ -7,6 +7,7 @@ from pathlib import Path
 from tkinter import ttk
 
 import numpy as np
+from matplotlib.backend_tools import Cursors
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from matplotlib.widgets import SpanSelector
@@ -16,6 +17,7 @@ from zulf_nmr.utils.visualization.results_plotter import draw_spectrum, draw_tim
 
 ROW_SIZE_IN = (11.0, 3.6)  # starting size; rows are stretched to the width of the window
 SELECTION_COLOUR = "#999999"
+EDGE_GRAB_PX = 10  # how close to an edge of the selection the mouse must be to resize it
 VIEW_S = 0.05  # time range shown at first, short enough to see the single samples
 ZOOM_STEP = 1.25  # per wheel notch
 PAN_STEP = 0.2  # fraction of the shown range per wheel notch
@@ -67,6 +69,10 @@ class TraceRow:
         self.selector: SpanSelector | None = None
         self.canvas.mpl_connect("scroll_event", self._on_scroll)
         self.canvas.mpl_connect("button_press_event", self._on_press)
+        self.canvas.mpl_connect("motion_notify_event", self._on_motion)
+        self.canvas.mpl_connect("button_release_event", self._on_release)
+        self._cursor = Cursors.POINTER
+        self._drag_cursor: Cursors | None = None  # cursor kept while the selection is dragged
 
     def show(self, data: np.ndarray, title: str, live: bool = False) -> None:
         """Draw new data (a new trace, or an updated average); the selected range and the
@@ -79,7 +85,8 @@ class TraceRow:
         # ax.clear() removes the selector's artists, so a new one is made for every redraw.
         self.selector = SpanSelector(
             self.ax_time, self._on_select, "horizontal", useblit=False, interactive=True,
-            drag_from_anywhere=True, button=1, props=dict(facecolor=SELECTION_COLOUR, alpha=0.25),
+            drag_from_anywhere=True, button=1, grab_range=EDGE_GRAB_PX,
+            props=dict(facecolor=SELECTION_COLOUR, alpha=0.25),
         )
         if self.t_range is not None:
             self.selector.extents = self.t_range
@@ -118,6 +125,39 @@ class TraceRow:
     def _on_press(self, event) -> None:
         if event.button == 3 and event.inaxes is self.ax_time:
             self.clear_selection()
+        elif event.button == 1:
+            # Keep the hover cursor while dragging; the SpanSelector sets its own on press,
+            # so it is set again once matplotlib has handled the event.
+            self._drag_cursor = self._hover_cursor(event)
+            self.widget.after_idle(self._set_cursor, self._drag_cursor, True)
+
+    def _on_release(self, event) -> None:
+        self._drag_cursor = None
+        # The SpanSelector resets the cursor on release; show the one for where the mouse is.
+        self.widget.after_idle(self._set_cursor, self._hover_cursor(event), True)
+
+    def _on_motion(self, event) -> None:
+        """Cursor over the time plot: double arrow at an edge of the selection (resize it),
+        hand inside it (move it), arrow elsewhere. Kept while the selection is dragged."""
+        if event.button is not None:
+            if self._drag_cursor is not None:
+                self._set_cursor(self._drag_cursor)
+            return
+        self._set_cursor(self._hover_cursor(event))
+
+    def _hover_cursor(self, event) -> Cursors:
+        if event.inaxes is self.ax_time and self.t_range is not None and self.selector is not None:
+            left, right = (self.ax_time.transData.transform((x, 0))[0] for x in self.selector.extents)
+            if abs(event.x - left) <= EDGE_GRAB_PX or abs(event.x - right) <= EDGE_GRAB_PX:
+                return Cursors.RESIZE_HORIZONTAL
+            if left < event.x < right:
+                return Cursors.HAND
+        return Cursors.POINTER
+
+    def _set_cursor(self, cursor: Cursors, force: bool = False) -> None:
+        if force or cursor != self._cursor:
+            self._cursor = cursor
+            self.canvas.set_cursor(cursor)
 
     def _draw_spectrum(self) -> None:
         draw_spectrum(self.ax_spec, self.data, self.rate, self.channels, self.t_range, self.average,
