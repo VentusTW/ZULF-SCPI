@@ -543,8 +543,6 @@ class App(tk.Tk):
             elif tag == "finished":
                 self._runner = None
                 self._set_progress(text)
-                if self._viewer is not None and self._viewer.winfo_exists():
-                    self._viewer.set_status(text)
                 self._update_run_button()
             else:
                 self._log(tag, text)

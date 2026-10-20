@@ -152,8 +152,7 @@ class ResultsViewer(tk.Toplevel):
 
         bottom = ttk.Frame(self, padding=8)
         bottom.pack(side="bottom", fill="x")
-        self._status = ttk.Label(bottom, text=str(folder))
-        self._status.pack(side="left")
+        ttk.Label(bottom, text=str(folder)).pack(side="left")  # what happens is shown by the progress bar
         ttk.Button(bottom, text="Close", command=self.destroy).pack(side="right")
         ttk.Label(bottom, text="Time plot: Ctrl + wheel zooms, Shift + wheel moves, "
                                "drag chooses the range of the spectrum, a click removes it.",
@@ -174,16 +173,31 @@ class ResultsViewer(tk.Toplevel):
 
         self._averages: dict[int, TraceRow] = {}  # by set index
         self._rows: dict[tuple[int, int], TraceRow] = {}  # by (set index, transient number)
+        # Mean of the complete transients of every set and how many there are.
+        self._complete: dict[int, tuple[np.ndarray, int]] = {}
 
     # ------------------------------------------------------------ live update
 
     def show_live(self, group: ResultGroup, number: int, data: np.ndarray, total_samples: int) -> None:
-        """Draw a transient that is still being acquired (data = samples received so far)."""
+        """Draw a transient that is still being acquired (data = samples received so far)
+        and the set's average with it, so the average is shown from the very start."""
         follow = self._at_bottom()
         row = self._row(group, number, total_samples)
         percent = 100 * len(data) // total_samples if total_samples else 0
         row.show(data, f"Set {group.set_index}: transient {number:03d} of {group.expected_transients}"
                        f"\nacquiring... {len(data)}/{total_samples} samples ({percent}%)", live=True)
+
+        complete, count = self._complete.get(group.set_index, (None, 0))
+        if complete is None:
+            live_average = data  # nothing to average with yet
+        else:
+            # Received samples: mean including the running transient; the rest: the complete ones.
+            k = min(len(data), len(complete))
+            live_average = complete.copy()
+            live_average[:k] = (complete[:k] * count + data[:k]) / (count + 1)
+        self._average_row(group, total_samples).show(
+            live_average, f"Set {group.set_index}: average - {count} complete transient(s) + transient "
+                          f"{number:03d} in progress ({percent}%)")
         self._follow(follow)
 
     def add_transient(self, group: ResultGroup, transient: Transient, average_data: np.ndarray, count: int) -> None:
@@ -193,19 +207,12 @@ class ResultsViewer(tk.Toplevel):
         row = self._row(group, transient.number, len(transient.data))
         row.show(transient.data, f"Set {group.set_index}: transient {transient.number:03d} of "
                                  f"{group.expected_transients}\n{transient.file.name}")
-        average = self._averages.get(group.set_index)
-        if average is None:
-            average = self._averages[group.set_index] = TraceRow(
-                self._inner, group.sample_rate_hz, group.channels, average=True,
-                total_samples=len(average_data), on_scroll=self._scroll, start_s=group.acquisition_start_s)
-            self._pack(average)
+        self._complete[group.set_index] = (average_data, count)
+        average = self._average_row(group, len(average_data))
         of = "" if count == group.expected_transients else f" (so far {count} of {group.expected_transients})"
         average.show(average_data, f"Set {group.set_index}: average of {count} transient(s){of}\n"
                                    f"{group.average_file.name}")
         self._follow(follow)
-
-    def set_status(self, text: str) -> None:
-        self._status.config(text=text)
 
     def set_progress(self, value: float, maximum: float, text: str) -> None:
         self._progress.config(maximum=maximum, value=value)
@@ -224,6 +231,16 @@ class ResultsViewer(tk.Toplevel):
             average = self._averages.get(group.set_index)
             self._pack(row, before=average.widget if average else None)
         return row
+
+    def _average_row(self, group: ResultGroup, total_samples: int) -> TraceRow:
+        """The average row of a set, created below its transients when needed."""
+        average = self._averages.get(group.set_index)
+        if average is None:
+            average = self._averages[group.set_index] = TraceRow(
+                self._inner, group.sample_rate_hz, group.channels, average=True,
+                total_samples=total_samples, on_scroll=self._scroll, start_s=group.acquisition_start_s)
+            self._pack(average)
+        return average
 
     def _at_bottom(self) -> bool:
         return self._view.yview()[1] >= 0.999
