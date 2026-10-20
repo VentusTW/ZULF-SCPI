@@ -9,7 +9,7 @@ import tkinter as tk
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
-from tkinter import filedialog, ttk
+from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 from typing import Any
 
@@ -27,6 +27,7 @@ from zulf_nmr.experiment.parser import (
     SystemConfig,
     load_system_config,
 )
+from zulf_nmr.experiment.history import HistoryError, load_results
 from zulf_nmr.experiment.runner import ExperimentAborted
 from zulf_nmr.experiment.sequence import acquisition_window_ms
 from zulf_nmr.experiment.schedule import QueueItem, QueueRunner, ResultGroup, Transient, format_delay
@@ -133,6 +134,7 @@ class App(tk.Tk):
         ttk.Button(top, text="Load connection", command=self._load_connection_file).pack(
             side="right", padx=(0, 6)
         )
+        ttk.Button(top, text="Load results", command=self._load_results).pack(side="right", padx=(0, 6))
 
         run_bar = ttk.Frame(self, padding=(8, 0, 8, 8))
         run_bar.pack(fill="x")
@@ -492,6 +494,28 @@ class App(tk.Tk):
             viewer.add_transient(group, transient, average, count)
 
     # --------------------------------------------------------------- results
+
+    def _load_results(self) -> None:
+        """Show the results of an earlier run: the user picks its whole folder."""
+        try:
+            initial = self._ensure_results_dir()
+        except OSError:
+            initial = APP_DIR
+        folder = filedialog.askdirectory(title="Select the folder of a run (e.g. 20261019_105039)",
+                                         initialdir=initial, mustexist=True)
+        if not folder:
+            return
+        try:
+            result, warnings = load_results(folder)
+        except (HistoryError, OSError) as e:
+            self._log("error", f"Cannot load results: {e}")
+            messagebox.showerror("Cannot load results", str(e), parent=self)
+            return
+        for warning in warnings:
+            self._log("error", f"   {warning}")
+        sets = ", ".join(f"{g.name} ({len(g.transients)})" for g in result.groups)
+        self._log("info", f"Loaded results from {result.folder}: {sets}")
+        ResultsViewer(self, result.folder).show_saved(result)
 
     def _results_dir(self) -> Path:
         path = self._system.data_output

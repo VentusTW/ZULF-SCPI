@@ -11,7 +11,7 @@ from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
 from matplotlib.figure import Figure
 from matplotlib.widgets import SpanSelector
 
-from zulf_nmr.experiment.schedule import ResultGroup, Transient
+from zulf_nmr.experiment.schedule import QueueResult, ResultGroup, Transient
 from zulf_nmr.utils.visualization.results_plotter import draw_spectrum, draw_time
 
 ROW_SIZE_IN = (11.0, 3.6)  # starting size; rows are stretched to the width of the window
@@ -213,6 +213,26 @@ class ResultsViewer(tk.Toplevel):
         average.show(average_data, f"Set {group.set_index}: average of {count} transient(s){of}\n"
                                    f"{group.average_file.name}")
         self._follow(follow)
+
+    def show_saved(self, result: QueueResult) -> None:
+        """Show the results of an earlier run, read back from its folder: every set's
+        transients, then its average."""
+        n_transients = 0
+        for group in result.groups:
+            for transient in group.transients:
+                row = self._row(group, transient.number, len(transient.data))
+                row.show(transient.data, f"Set {group.set_index}: transient {transient.number:03d} of "
+                                         f"{group.expected_transients}\n{transient.file.name}")
+            count = len(group.transients)
+            n_transients += count
+            missing = (f" (only {count} of {group.expected_transients} saved)"
+                       if count < group.expected_transients else "")
+            self._average_row(group, len(group.average)).show(
+                group.average, f"Set {group.set_index}: average of {count} transient(s){missing}\n"
+                               f"{group.average_file.name}")
+        self.update_idletasks()
+        self._view.yview_moveto(0.0)
+        self.set_progress(1, 1, f"Loaded {len(result.groups)} set(s), {n_transients} transient(s)")
 
     def set_progress(self, value: float, maximum: float, text: str) -> None:
         self._progress.config(maximum=maximum, value=value)
