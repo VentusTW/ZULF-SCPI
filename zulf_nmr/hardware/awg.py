@@ -73,6 +73,9 @@ def pack_samples(codes: np.ndarray, enable: np.ndarray | None = None) -> bytes:
 #   sample_rate_hz  float scalar  DAC sample rate
 #   ranges          int   (4,)    optional, AwgRange per channel (default: HIGH)
 #   enable          int   (N, 4)  optional, 2-bit enable per sample (default: 1)
+#   formulas        str   (4,)    optional, written by the AWG editor (not sent to the device)
+#   duration_ms     float scalar  optional, written by the AWG editor
+#   data_currents_A, data_sample_rate_hz  optional, the file a data(n) formula refers to
 
 
 @dataclass(frozen=True)
@@ -119,7 +122,8 @@ def load_awg_npz(
     missing = {"currents_A", "sample_rate_hz"} - arrays.keys()
     if missing:
         raise ValueError(f"{path}: missing array(s) {', '.join(sorted(missing))}")
-    unknown = arrays.keys() - {"currents_A", "sample_rate_hz", "ranges", "enable"}
+    unknown = arrays.keys() - {"currents_A", "sample_rate_hz", "ranges", "enable", "formulas", "duration_ms",
+                               "data_currents_A", "data_sample_rate_hz"}
     if unknown:
         raise ValueError(f"{path}: unknown array(s) {', '.join(sorted(unknown))}")
 

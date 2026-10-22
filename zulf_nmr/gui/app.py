@@ -31,6 +31,7 @@ from zulf_nmr.experiment.history import HistoryError, load_results
 from zulf_nmr.experiment.runner import ExperimentAborted
 from zulf_nmr.experiment.sequence import acquisition_window_ms
 from zulf_nmr.experiment.schedule import QueueItem, QueueRunner, ResultGroup, Transient, format_delay
+from zulf_nmr.gui.awg_editor import AwgEditor
 from zulf_nmr.gui.preview import PlotPreview
 from zulf_nmr.gui.queue_editor import QueueEditor
 from zulf_nmr.gui.results_viewer import ResultsViewer
@@ -135,6 +136,7 @@ class App(tk.Tk):
             side="right", padx=(0, 6)
         )
         ttk.Button(top, text="Load results", command=self._load_results).pack(side="right", padx=(0, 6))
+        ttk.Button(top, text="AWG editor", command=self._open_awg_editor).pack(side="right", padx=(0, 6))
 
         run_bar = ttk.Frame(self, padding=(8, 0, 8, 8))
         run_bar.pack(fill="x")
@@ -492,6 +494,14 @@ class App(tk.Tk):
                            f"{group.expected_transients} done", self._transients_done)
         if viewer is not None:
             viewer.add_transient(group, transient, average, count)
+
+    # ------------------------------------------------------------ AWG editor
+
+    def _open_awg_editor(self) -> None:
+        limits = self._system.hardware_limits
+        AwgEditor(self, APP_DIR / "data" / "sequences", limits.max_awg_sample_rate_hz, limits.max_awg_amplitude_A,
+                  on_saved=lambda path, w: self._log(
+                      "info", f"AWG sequence saved: {path} ({w.n_samples} samples, {w.sample_rate_hz:g} Hz)"))
 
     # --------------------------------------------------------------- results
 
