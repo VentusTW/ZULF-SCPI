@@ -14,6 +14,17 @@ CHANNEL_COLOURS = ("#0072B2", "#E69F00", "#009E73", "#CC79A7")  # Okabe-Ito
 
 
 ACQUISITION_COLOUR = "#D55E00"
+_Y_MARGIN = 0.1  # of the data's span, above and below
+
+
+def _y_range(values_mA, full_scale_mA: float) -> tuple[float, float]:
+    """Y axis of one channel: fitted to its own values (0 always shown, a margin around);
+    an empty channel (all zero) gets the standard scale, its range's full scale."""
+    low, high = min(float(values_mA.min()), 0.0), max(float(values_mA.max()), 0.0)
+    if high - low == 0:
+        return -1.1 * full_scale_mA, 1.1 * full_scale_mA
+    margin = _Y_MARGIN * (high - low)
+    return low - margin, high + margin
 
 
 def plot_awg(
@@ -39,9 +50,10 @@ def plot_awg(
 
     for ch, (ax, range_, colour) in enumerate(zip(axes, waveform.ranges, CHANNEL_COLOURS), start=1):
         full_scale_mA = RANGE_FULL_SCALE_A[range_] * 1000
-        ax.step(t_ms, waveform.currents_A[:, ch - 1] * 1000, where="post", color=colour, linewidth=1.2)
+        values_mA = waveform.currents_A[:, ch - 1] * 1000
+        ax.step(t_ms, values_mA, where="post", color=colour, linewidth=1.2)
         ax.axhline(0, color="#D0D0D0", linewidth=0.8, zorder=0)
-        ax.set_ylim(-1.1 * full_scale_mA, 1.1 * full_scale_mA)
+        ax.set_ylim(*_y_range(values_mA, full_scale_mA))
         range_name = "LOW" if range_ == AwgRange.LOW else "HIGH"
         ax.set_ylabel(f"CH{ch} (mA)\n{range_name} ±{full_scale_mA:g}", fontsize=9)
         ax.grid(linestyle="--", alpha=0.4)

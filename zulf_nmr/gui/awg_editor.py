@@ -20,6 +20,7 @@ from zulf_nmr.hardware.awg_formula import (
     open_for_editing,
     save_waveform,
 )
+from zulf_nmr.gui.formula_hint import GhostText
 from zulf_nmr.utils.visualization.awg_plotter import plot_awg
 
 _COLOR_ERROR = "#d0342c"
@@ -35,13 +36,9 @@ _KEYPAD = [
 ]
 _FUNCTIONS = {"sin", "cos", "tan", "exp", "log", "sqrt", "abs", "min", "max",
               "step", "pulse", "ramp", "gauss", "hann", "chirp", "data"}
-_HELP = (
-    "Current in mA as a function of t (seconds after :AWG:RUN). A unit can follow a number: 1.6ms, 2 s, 20us,\n"
-    "300Hz, 5kHz, 0.2A (= 200 mA). Units: s sec ms us ns  Hz kHz MHz  mA uA A.\n"
-    "step(t0)   pulse(t0, t1)   ramp(t0, t1)   gauss(t0, sigma)   hann(t0, t1)   chirp(f0, f1, t0, t1)\n"
-    "data(n) = channel n of the file opened with Open... (any AWG .npz)\n"
-    "e.g.  200*pulse(5ms, 15ms)      8*sin(2*pi*300Hz*t)*exp(-t/15ms)      300*chirp(100Hz, 800Hz, 10ms, 60ms)"
-)
+# Greyed in an empty formula field.
+_EXAMPLES = ("200*pulse(5ms, 15ms)", "5*sin(2*pi*300Hz*t)*exp(-t/15ms)",
+             "500*ramp(40ms, 45ms) - 500*ramp(65ms, 70ms)", "300*chirp(100Hz, 800Hz, 10ms, 60ms)")
 
 
 class AwgEditor(tk.Toplevel):
@@ -119,11 +116,12 @@ class AwgEditor(tk.Toplevel):
             entry.grid(row=2 * i, column=2, sticky="ew", padx=6)
             entry.bind("<FocusIn>", lambda _e, w=entry: setattr(self, "_active", w))
             self._entries.append(entry)
+            ghost = GhostText(entry, f"e.g. {_EXAMPLES[i]}")
+            # Typed by a keypad button or set by Open... (no key event): update the hint too.
+            self._formulas[i].trace_add("write", lambda *_, g=ghost: self.after_idle(g.update))
             status = ttk.Label(grid, text="", foreground="#666666")
             status.grid(row=2 * i + 1, column=2, sticky="w", padx=6, pady=(0, 4))
             self._status.append(status)
-        ttk.Label(left, text=_HELP, foreground="#444444", font=("Consolas", 9), justify="left").pack(
-            side="top", anchor="w")
 
         keypad = ttk.LabelFrame(top, text="Calculator", padding=6)
         keypad.pack(side="right", anchor="n", padx=(12, 0))
@@ -141,8 +139,6 @@ class AwgEditor(tk.Toplevel):
                    command=lambda: self._key("<")).grid(row=last, column=6, padx=1, pady=1)
         ttk.Button(keypad, text="C", width=6, takefocus=False,
                    command=lambda: self._key("C")).grid(row=last, column=7, padx=1, pady=1)
-        ttk.Label(keypad, text="Types at the cursor.", foreground="#666666").grid(
-            row=last, column=3, columnspan=3, sticky="w")
 
         self._figure = Figure(figsize=(11, 6), layout="constrained")
         self._canvas = FigureCanvasTkAgg(self._figure, master=self)

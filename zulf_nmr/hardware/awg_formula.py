@@ -138,7 +138,17 @@ def check_formula(text: str) -> ast.Expression:
     try:
         tree = ast.parse(normalise(text), mode="eval")
     except SyntaxError as e:
-        raise FormulaError(f"syntax error at character {e.offset}") from None
+        # Usually a formula still being typed. No character position: it would count in the
+        # rewritten text (5ms -> (5*ms)), not in what the user sees.
+        missing = text.count("(") - text.count(")")
+        if missing > 0:
+            raise FormulaError(f"missing {')' * missing}") from None
+        if missing < 0:
+            raise FormulaError(f"{-missing} ')' too many") from None
+        end = text.rstrip()[-1:]
+        if end and end in "+-*/^%,.":
+            raise FormulaError(f"unfinished - ends with '{end}'") from None
+        raise FormulaError("syntax error") from None
     called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
     for node in ast.walk(tree):
         if not isinstance(node, _ALLOWED_NODES):
