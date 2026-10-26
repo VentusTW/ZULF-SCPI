@@ -21,6 +21,7 @@ from zulf_nmr.hardware.awg_formula import (
     save_waveform,
 )
 from zulf_nmr.gui.formula_hint import GhostText
+from zulf_nmr.gui.tooltip import Tooltip
 from zulf_nmr.utils.visualization.awg_plotter import plot_awg
 
 _COLOR_ERROR = "#d0342c"
@@ -36,6 +37,30 @@ _KEYPAD = [
 ]
 _FUNCTIONS = {"sin", "cos", "tan", "exp", "log", "sqrt", "abs", "min", "max",
               "step", "pulse", "ramp", "gauss", "hann", "chirp", "data"}
+# Shown after the mouse rests on a keypad key (digits have none).
+_KEY_NAMES = {
+    "/": "divide", "*": "multiply", "-": "subtract (or minus)", "+": "add", "^": "power: 2^3 = 8",
+    ".": "decimal point", ",": "separates the arguments of a function", "(": "opening bracket",
+    ")": "closing bracket",
+    "sin": "sin(x) - sine (x in radians)", "cos": "cos(x) - cosine (x in radians)",
+    "tan": "tan(x) - tangent (x in radians)", "exp": "exp(x) - exponential function, e to the power x",
+    "log": "log(x) - natural logarithm", "sqrt": "sqrt(x) - square root", "abs": "abs(x) - absolute value",
+    "min": "min(a, b) - the smaller of a and b, at every moment",
+    "max": "max(a, b) - the larger of a and b, at every moment",
+    "pi": "pi - 3.14159...", "e": "e - Euler's number, 2.71828...",
+    "t": "t - time in seconds after :AWG:RUN",
+    "ms": "ms - millisecond, 0.001 s", "us": "us - microsecond, 0.000001 s", "s": "s - second",
+    "kHz": "kHz - kilohertz, 1000 Hz", "Hz": "Hz - hertz",
+    "step": "step(t0) - 0 before t0, 1 from t0 on",
+    "pulse": "pulse(t0, t1) - 1 from t0 to t1, 0 elsewhere",
+    "ramp": "ramp(t0, t1) - rises in a straight line from 0 at t0 to 1 at t1, then stays 1",
+    "gauss": "gauss(t0, sigma) - Gaussian bell centred at t0, height 1",
+    "hann": "hann(t0, t1) - smooth window: 0 at t0, 1 in the middle, 0 at t1",
+    "chirp": "chirp(f0, f1, t0, t1) - sine sweeping from f0 to f1 between t0 and t1, 0 outside",
+    "data": "data(n) - channel n of the file opened with Open...",
+    "<": "delete the character before the cursor", "C": "clear the whole formula",
+}
+
 # Greyed in an empty formula field.
 _EXAMPLES = ("200*pulse(5ms, 15ms)", "5*sin(2*pi*300Hz*t)*exp(-t/15ms)",
              "500*ramp(40ms, 45ms) - 500*ramp(65ms, 70ms)", "300*chirp(100Hz, 800Hz, 10ms, 60ms)")
@@ -125,20 +150,15 @@ class AwgEditor(tk.Toplevel):
 
         keypad = ttk.LabelFrame(top, text="Calculator", padding=6)
         keypad.pack(side="right", anchor="n", padx=(12, 0))
-        for r, row in enumerate(_KEYPAD):
-            for c, key in enumerate(row):
-                ttk.Button(keypad, text=key, width=6, takefocus=False,
-                           command=lambda k=key: self._key(k)).grid(row=r, column=c, padx=1, pady=1)
         last = len(_KEYPAD)
-        ttk.Button(keypad, text="data", width=6, takefocus=False,
-                   command=lambda: self._key("data")).grid(row=last, column=0, padx=1, pady=1)
-        for column, unit in ((1, "s"), (2, "Hz")):
-            ttk.Button(keypad, text=unit, width=6, takefocus=False,
-                       command=lambda k=unit: self._key(k)).grid(row=last, column=column, padx=1, pady=1)
-        ttk.Button(keypad, text="⌫", width=6, takefocus=False,
-                   command=lambda: self._key("<")).grid(row=last, column=6, padx=1, pady=1)
-        ttk.Button(keypad, text="C", width=6, takefocus=False,
-                   command=lambda: self._key("C")).grid(row=last, column=7, padx=1, pady=1)
+        keys = [(r, c, key, key) for r, row in enumerate(_KEYPAD) for c, key in enumerate(row)]
+        keys += [(last, 0, "data", "data"), (last, 1, "s", "s"), (last, 2, "Hz", "Hz"),
+                 (last, 6, "⌫", "<"), (last, 7, "C", "C")]
+        for r, c, label, key in keys:
+            button = ttk.Button(keypad, text=label, width=6, takefocus=False, command=lambda k=key: self._key(k))
+            button.grid(row=r, column=c, padx=1, pady=1)
+            if key in _KEY_NAMES:
+                Tooltip(button, _KEY_NAMES[key])
 
         self._figure = Figure(figsize=(11, 6), layout="constrained")
         self._canvas = FigureCanvasTkAgg(self._figure, master=self)
