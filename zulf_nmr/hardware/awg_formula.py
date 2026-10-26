@@ -139,9 +139,12 @@ def check_formula(text: str) -> ast.Expression:
         tree = ast.parse(normalise(text), mode="eval")
     except SyntaxError as e:
         raise FormulaError(f"syntax error at character {e.offset}") from None
+    called = {id(node.func) for node in ast.walk(tree) if isinstance(node, ast.Call)}
     for node in ast.walk(tree):
         if not isinstance(node, _ALLOWED_NODES):
             raise FormulaError(f"'{type(node).__name__}' is not allowed")
+        if isinstance(node, ast.Name) and node.id in (*MATH, *SHAPES, "data") and id(node) not in called:
+            raise FormulaError(f"{node.id} is a function - write {node.id}(...)")
         if isinstance(node, ast.Constant) and not isinstance(node.value, (int, float)):
             raise FormulaError(f"{node.value!r} is not a number")
         if isinstance(node, ast.Name) and node.id not in NAMES:

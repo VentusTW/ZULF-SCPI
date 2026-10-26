@@ -24,7 +24,6 @@ from zulf_nmr.utils.visualization.awg_plotter import plot_awg
 
 _COLOR_ERROR = "#d0342c"
 _RANGES = {"HIGH (1 A)": AwgRange.HIGH, "LOW (10 mA)": AwgRange.LOW}
-_UPDATE_DELAY_MS = 400
 
 # Calculator keypad: (label, text inserted). "<" = backspace, "C" = clear the formula.
 _KEYPAD = [
@@ -164,9 +163,10 @@ class AwgEditor(tk.Toplevel):
     # ---------------------------------------------------------------- update
 
     def _schedule_update(self) -> None:
-        if self._pending is not None:
-            self.after_cancel(self._pending)
-        self._pending = self.after(_UPDATE_DELAY_MS, self._update)
+        # At once, as soon as Tk is idle: several changes in one event (e.g. Open... setting
+        # every field) still give one update.
+        if self._pending is None:
+            self._pending = self.after_idle(self._update)
 
     def _channels(self) -> list[ChannelFormula]:
         return [ChannelFormula(self._formulas[i].get(), _RANGES[self._ranges[i].get()]) for i in range(N_CHANNELS)]
@@ -196,16 +196,18 @@ class AwgEditor(tk.Toplevel):
                              foreground="#2e9e44" if self._formulas[i].get().strip() else "#666666")
             else:
                 label.config(text="")
-        if waveform is not None:
+        if not self._errors:
+            # Every channel is OK: draw it now.
             self._summary.config(
-                text=f"{waveform.n_samples} samples, {waveform.sample_rate_hz:g} Hz, {waveform.duration_s * 1000:g} ms"
-                     + ("" if not self._errors else "  -  fix the errors to save"),
-                foreground=_COLOR_ERROR if self._errors else "")
+                text=f"{waveform.n_samples} samples, {waveform.sample_rate_hz:g} Hz, {waveform.duration_s * 1000:g} ms",
+                foreground="")
             self._figure.clear()
             plot_awg(waveform, fig=self._figure)
             self._canvas.draw_idle()
         else:
-            self._summary.config(text="fix the errors to see the preview", foreground=_COLOR_ERROR)
+            # E.g. a formula half typed: keep the last valid preview instead of a broken one.
+            self._summary.config(text="fix the errors - the preview shows the last valid version",
+                                 foreground=_COLOR_ERROR)
 
     # ------------------------------------------------------------ open, save
 
