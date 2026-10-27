@@ -15,6 +15,7 @@ from typing import Callable
 
 import numpy as np
 
+from zulf_nmr.core.errors import english_error
 from zulf_nmr.core.spectrometer import Spectrometer
 from zulf_nmr.experiment.parser import (
     ConfigError,
@@ -99,7 +100,7 @@ class QueueItem:
             self.errors = ["file not found"]
             return
         except (OSError, json.JSONDecodeError) as e:
-            self.errors = [f"cannot read the file: {e}"]
+            self.errors = [f"cannot read the file: {english_error(e)}"]
             return
         if isinstance(data, dict) and "connection" in data and "events" not in data:
             self.errors = ["this is a connection file (system.json), not an experiment - "

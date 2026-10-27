@@ -12,6 +12,8 @@ from typing import Callable, Union
 
 import serial
 
+from zulf_nmr.core.errors import english_error
+
 log = logging.getLogger(__name__)
 
 # Folder holding config/ and data/: the package folder, or - in a PyInstaller
@@ -181,7 +183,8 @@ class SCPIConnection:
 
     def _raise_if_listener_failed(self) -> None:
         if self._listener_error is not None:
-            raise ConnectionError(f"Connection lost: {self._listener_error}") from self._listener_error
+            raise ConnectionError(f"Connection lost: {english_error(self._listener_error)}") \
+                from self._listener_error
 
     # -------------------------------------------------------------- listener
 
@@ -197,7 +200,7 @@ class SCPIConnection:
                     self._dispatch(message)
         except Exception as e:  # port unplugged, driver error, malformed header...
             if not self._stop.is_set():
-                log.error("SCPI listener stopped: %s", e)
+                log.error("SCPI listener stopped: %s", english_error(e))
                 self._listener_error = e
 
     def _parse(self, buf: bytearray) -> list[Message]:

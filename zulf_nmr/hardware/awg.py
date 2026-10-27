@@ -9,6 +9,8 @@ from typing import TYPE_CHECKING, Sequence
 
 import numpy as np
 
+from zulf_nmr.core.errors import english_error
+
 if TYPE_CHECKING:
     from zulf_nmr.core.connection import SCPIConnection
 
@@ -117,7 +119,7 @@ def load_awg_npz(
     except FileNotFoundError:
         raise ValueError(f"{path}: file not found") from None
     except Exception as e:
-        raise ValueError(f"{path}: not a valid .npz file ({e})") from None
+        raise ValueError(f"{path}: not a valid .npz file ({english_error(e)})") from None
 
     missing = {"currents_A", "sample_rate_hz"} - arrays.keys()
     if missing:

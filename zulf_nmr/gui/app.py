@@ -18,6 +18,7 @@ from matplotlib.figure import Figure
 from serial.tools import list_ports
 
 from zulf_nmr.core.connection import APP_DIR, DEFAULT_SYSTEM_CONFIG, Message, SCPIConnection
+from zulf_nmr.core.errors import english_error
 from zulf_nmr.core.scpi import header_matches
 from zulf_nmr.core.spectrometer import Spectrometer
 from zulf_nmr.experiment.parser import (
@@ -218,7 +219,7 @@ class App(tk.Tk):
         try:
             self._connection.connect()
         except Exception as e:  # SerialException, ValueError for a bad URL...
-            self._log("error", f"Cannot connect to {port}: {e}")
+            self._log("error", f"Cannot connect to {port}: {english_error(e)}")
         else:
             self._log("info", f"Connected to {port} ({baudrate} baud)")
         self._poll_status(reschedule=False)
@@ -284,7 +285,7 @@ class App(tk.Tk):
             except TimeoutError:
                 self._incoming.put(("error", f"No reply to {command!r}"))
             except Exception as e:
-                self._incoming.put(("error", f"Error sending {command!r}: {e}"))
+                self._incoming.put(("error", f"Error sending {command!r}: {english_error(e)}"))
 
     def _history_step(self, step: int) -> str:
         if self._history:
@@ -428,7 +429,7 @@ class App(tk.Tk):
                 on_live=lambda group, number, data: self._incoming.put(("live", (group, number, data))),
             )
         except (ValueError, OSError) as e:
-            self._log("error", f"Cannot start the queue: {e}")
+            self._log("error", f"Cannot start the queue: {english_error(e)}")
             return
         # One step per transient of every set; a running transient adds its share of points.
         self._transients_done = 0
@@ -446,7 +447,7 @@ class App(tk.Tk):
             outcome = "Queue aborted" + ("" if runner.simulate else " - *RST sent")
             self._incoming.put(("error", outcome))
         except Exception as e:
-            outcome = f"Queue failed: {e}"
+            outcome = f"Queue failed: {english_error(e)}"
             self._incoming.put(("error", outcome))
         else:
             outcome = f"Queue finished ({len(runner.items)} set(s))"
@@ -518,8 +519,8 @@ class App(tk.Tk):
         try:
             result, warnings = load_results(folder)
         except (HistoryError, OSError) as e:
-            self._log("error", f"Cannot load results: {e}")
-            messagebox.showerror("Cannot load results", str(e), parent=self)
+            self._log("error", f"Cannot load results: {english_error(e)}")
+            messagebox.showerror("Cannot load results", english_error(e), parent=self)
             return
         for warning in warnings:
             self._log("error", f"   {warning}")
@@ -539,7 +540,7 @@ class App(tk.Tk):
             try:
                 path.mkdir(parents=True, exist_ok=True)
             except OSError as e:
-                self._log("error", f"Cannot create the results folder {path}: {e}")
+                self._log("error", f"Cannot create the results folder {path}: {english_error(e)}")
                 raise
             self._log("info", f"Created the results folder {path}")
         return path

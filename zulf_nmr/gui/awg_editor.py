@@ -11,6 +11,7 @@ from matplotlib.figure import Figure
 
 import numpy as np
 
+from zulf_nmr.core.errors import english_error
 from zulf_nmr.hardware.awg import N_CHANNELS, RANGE_FULL_SCALE_A, AwgRange, AwgWaveform
 from zulf_nmr.hardware.awg_fit import fit_channel
 from zulf_nmr.hardware.awg_formula import (
@@ -245,7 +246,7 @@ class AwgEditor(tk.Toplevel):
             saved = save_waveform(path, self._waveform, self._channels(), float(self._duration.get()),
                                   self._max_rate, self._max_amp, self._source)
         except (OSError, ValueError) as e:
-            messagebox.showerror("Cannot save", str(e), parent=self)
+            messagebox.showerror("Cannot save", english_error(e), parent=self)
             return
         self._initial_dir = Path(path).parent
         if self._on_saved:
@@ -289,7 +290,7 @@ class AwgEditor(tk.Toplevel):
         try:
             channels, rate, duration, source = open_for_editing(path, self._max_rate, self._max_amp)
         except (OSError, ValueError, KeyError) as e:
-            messagebox.showerror("Cannot open", str(e), parent=self)
+            messagebox.showerror("Cannot open", english_error(e), parent=self)
             return
         self._source = source
         self._source_label.config(text=f"data(n) = channels of {source.name}" if source else "")

@@ -8,6 +8,7 @@ from pathlib import Path
 
 import numpy as np
 
+from zulf_nmr.core.errors import english_error
 from zulf_nmr.experiment.parser import ConfigError, HardwareLimits, parse_experiment
 from zulf_nmr.experiment.schedule import QueueResult, ResultGroup, Transient
 from zulf_nmr.experiment.sequence import acquisition_window_ms
@@ -60,7 +61,7 @@ def load_results(folder: str | Path) -> tuple[QueueResult, list[str]]:
         try:
             result.groups.append(_load_group(index, name, entry, warnings))
         except (OSError, ValueError) as e:
-            warnings.append(f"{name}: {e} - set skipped")
+            warnings.append(f"{name}: {english_error(e)} - set skipped")
     if not result.groups:
         raise HistoryError("No set could be read:\n" + "\n".join(warnings))
     return result, warnings
@@ -89,7 +90,7 @@ def _load_group(index: int, name: str, entry: dict, warnings: list[str]) -> Resu
             window = acquisition_window_ms(config)
             start_s = window[0] / 1000 if window else 0.0
         except (OSError, ValueError) as e:
-            warnings.append(f"{config_file.name}: {e} - time axis starts at 0")
+            warnings.append(f"{config_file.name}: {english_error(e)} - time axis starts at 0")
     else:
         warnings.append(f"{name}: no _config.json - time axis starts at 0")
 
