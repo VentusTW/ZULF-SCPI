@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import queue
+import sys
 import threading
 import tkinter as tk
 from dataclasses import asdict
@@ -48,6 +50,10 @@ DEFAULT_SYSTEM = SystemConfig(
     data_output=Path("data/results/"),
 )
 
+# The DM Technologies logo (from dmtechnologies.eu) as the window and taskbar icon; inside
+# the PyInstaller executable the folder is unpacked next to the code.
+ICON_DIR = Path(__file__).resolve().parent / "assets"
+
 _STATUS_POLL_MS = 500
 _LOG_POLL_MS = 100
 _MAX_LOG_LINE = 300  # longer console lines (e.g. echoed binary data) are cut
@@ -71,6 +77,7 @@ class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
         self.title("ZULF-SCPI")
+        self._set_icon()
         self.geometry("820x560")
         self.minsize(640, 400)
 
@@ -545,6 +552,16 @@ class App(tk.Tk):
             self._log("info", f"Created the results folder {path}")
         return path
 
+    def _set_icon(self) -> None:
+        """DM Technologies logo instead of Tk's feather, for this and every later window."""
+        try:
+            if sys.platform == "win32":
+                self.iconbitmap(default=str(ICON_DIR / "icon.ico"))
+            self._icon = tk.PhotoImage(file=str(ICON_DIR / "icon.png"))  # kept: Tk needs the image alive
+            self.iconphoto(True, self._icon)
+        except (tk.TclError, OSError):
+            log.warning("Window icon not found in %s", ICON_DIR)
+
     # ------------------------------------------------------------------- log
 
     def _log(self, tag: str, text: str) -> None:
@@ -594,6 +611,12 @@ class App(tk.Tk):
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
+    if sys.platform == "win32":
+        # Own taskbar entry with the program's icon (not Python's) when run from Python.
+        try:
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("DMTechnologies.ZULF-SCPI")
+        except (AttributeError, OSError):
+            pass
     App().mainloop()
 
 

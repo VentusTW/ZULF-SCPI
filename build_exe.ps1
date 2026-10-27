@@ -5,10 +5,15 @@
 
 Set-Location $PSScriptRoot
 
+# The logo: the .exe file's icon, and the assets folder inside it for the window icons.
+# Absolute paths - PyInstaller resolves relative ones against the spec folder (build\).
+$assets = (Resolve-Path zulf_nmr\gui\assets).Path
+
 # PyInstaller logs to stderr; with ErrorActionPreference=Stop Windows PowerShell
 # would treat that as a failure, so only the exit code is checked.
 & .venv\Scripts\python -m PyInstaller --noconfirm --clean --onefile --windowed `
     --name ZULF-SCPI --paths . `
+    --icon "$assets\icon.ico" --add-data "$assets;zulf_nmr\gui\assets" `
     --distpath exe --workpath build --specpath build `
     zulf_nmr\gui\__main__.py 2>&1 | ForEach-Object { "$_" }
 if ($LASTEXITCODE -ne 0) { Write-Error "PyInstaller failed ($LASTEXITCODE)"; exit $LASTEXITCODE }
