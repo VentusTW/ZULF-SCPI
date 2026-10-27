@@ -28,15 +28,29 @@ from zulf_nmr.utils.visualization.awg_plotter import plot_awg
 _COLOR_ERROR = "#d0342c"
 _RANGES = {"HIGH (1 A)": AwgRange.HIGH, "LOW (10 mA)": AwgRange.LOW}
 
-# Calculator keypad: (label, text inserted). "<" = backspace, "C" = clear the formula.
+# Calculator keypad: groups of keys, side by side; every key inserts its text
+# ("<" = backspace, "C" = clear the formula), "" leaves a gap.
 _KEYPAD = [
-    ["7", "8", "9", "/", "sin", "cos", "tan", "pi"],
-    ["4", "5", "6", "*", "exp", "log", "sqrt", "e"],
-    ["1", "2", "3", "-", "abs", "min", "max", "t"],
-    ["0", ".", ",", "+", "^", "(", ")", "ms"],
-    ["step", "pulse", "ramp", "gauss", "hann", "chirp", "us", "kHz"],
+    ("Numbers", [["7", "8", "9", "/"],
+                 ["4", "5", "6", "*"],
+                 ["1", "2", "3", "-"],
+                 ["0", ".", ",", "+"],
+                 ["(", ")", "<", "C"]]),
+    ("Functions", [["sin", "cos", "tan"],
+                   ["exp", "log", "abs"],
+                   ["^", "sqrt", "root"],
+                   ["min", "max", ""]]),
+    ("Shapes", [["step", "pulse"],
+                ["ramp", "gauss"],
+                ["hann", "chirp"],
+                ["data", ""]]),
+    ("Time and units", [["t", "s"],
+                        ["ms", "us"],
+                        ["Hz", "kHz"],
+                        ["pi", "e"]]),
 ]
-_FUNCTIONS = {"sin", "cos", "tan", "exp", "log", "sqrt", "abs", "min", "max",
+_KEY_LABELS = {"<": "⌫"}
+_FUNCTIONS = {"sin", "cos", "tan", "exp", "log", "sqrt", "root", "abs", "min", "max",
               "step", "pulse", "ramp", "gauss", "hann", "chirp", "data"}
 # Shown after the mouse rests on a keypad key (digits have none).
 _KEY_NAMES = {
@@ -45,7 +59,9 @@ _KEY_NAMES = {
     ")": "closing bracket",
     "sin": "sin(x) - sine (x in radians)", "cos": "cos(x) - cosine (x in radians)",
     "tan": "tan(x) - tangent (x in radians)", "exp": "exp(x) - exponential function, e to the power x",
-    "log": "log(x) - natural logarithm", "sqrt": "sqrt(x) - square root", "abs": "abs(x) - absolute value",
+    "log": "log(x) - natural logarithm", "sqrt": "sqrt(x) - square root",
+    "root": "root(x, n) - n-th root of x; an odd n also takes x < 0: root(-8, 3) = -2",
+    "abs": "abs(x) - absolute value",
     "min": "min(a, b) - the smaller of a and b, at every moment",
     "max": "max(a, b) - the larger of a and b, at every moment",
     "pi": "pi - 3.14159...", "e": "e - Euler's number, 2.71828...",
@@ -149,17 +165,20 @@ class AwgEditor(tk.Toplevel):
             status.grid(row=2 * i + 1, column=2, sticky="w", padx=6, pady=(0, 4))
             self._status.append(status)
 
-        keypad = ttk.LabelFrame(top, text="Calculator", padding=6)
+        keypad = ttk.Frame(top)
         keypad.pack(side="right", anchor="n", padx=(12, 0))
-        last = len(_KEYPAD)
-        keys = [(r, c, key, key) for r, row in enumerate(_KEYPAD) for c, key in enumerate(row)]
-        keys += [(last, 0, "data", "data"), (last, 1, "s", "s"), (last, 2, "Hz", "Hz"),
-                 (last, 6, "⌫", "<"), (last, 7, "C", "C")]
-        for r, c, label, key in keys:
-            button = ttk.Button(keypad, text=label, width=6, takefocus=False, command=lambda k=key: self._key(k))
-            button.grid(row=r, column=c, padx=1, pady=1)
-            if key in _KEY_NAMES:
-                Tooltip(button, _KEY_NAMES[key])
+        for g, (title, rows) in enumerate(_KEYPAD):
+            group = ttk.LabelFrame(keypad, text=title, padding=4)
+            group.grid(row=0, column=g, sticky="ns", padx=(0 if g == 0 else 6, 0))
+            for r, row in enumerate(rows):
+                for c, key in enumerate(row):
+                    if not key:
+                        continue
+                    button = ttk.Button(group, text=_KEY_LABELS.get(key, key), width=6, takefocus=False,
+                                        command=lambda k=key: self._key(k))
+                    button.grid(row=r, column=c, padx=1, pady=1)
+                    if key in _KEY_NAMES:
+                        Tooltip(button, _KEY_NAMES[key])
 
         self._figure = Figure(figsize=(11, 6), layout="constrained")
         self._canvas = FigureCanvasTkAgg(self._figure, master=self)

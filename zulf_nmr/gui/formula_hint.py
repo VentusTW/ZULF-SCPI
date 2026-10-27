@@ -11,7 +11,7 @@ from tkinter import ttk
 SIGNATURES: dict[str, tuple[str, ...]] = {
     "step": ("t0",), "pulse": ("t0", "t1"), "ramp": ("t0", "t1"), "gauss": ("t0", "sigma"),
     "hann": ("t0", "t1"), "chirp": ("f0", "f1", "t0", "t1"), "data": ("n",),
-    "min": ("a", "b"), "max": ("a", "b"),
+    "min": ("a", "b"), "max": ("a", "b"), "root": ("x", "n"),
     **{name: ("x",) for name in ("sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh",
                                  "exp", "log", "log10", "sqrt", "abs", "sign", "floor", "ceil", "round")},
 }

@@ -65,11 +65,26 @@ def _shapes(t: np.ndarray) -> dict[str, object]:
     return {"step": step, "pulse": pulse, "ramp": ramp, "gauss": gauss, "hann": hann, "chirp": chirp}
 
 
+def root(x, n, t: np.ndarray | None = None) -> np.ndarray:
+    """n-th root of x; an odd whole n also takes a negative x: root(-8, 3) = -2.
+    t, when given, is only used to say where x is negative."""
+    x, n = np.broadcast_arrays(np.asarray(x, dtype=float), np.asarray(n, dtype=float))
+    if (n == 0).any():
+        raise FormulaError("root(x, n): n must not be 0")
+    bad = (x < 0) & (np.mod(n, 2) != 1)  # np.mod(-3, 2) is 1, so odd negative n count as odd
+    if bad.any():
+        where = ""
+        if t is not None and bad.shape == np.shape(t):
+            where = f" at t = {t[bad][0] * 1000:g} ms"
+        raise FormulaError(f"root of a negative number{where} - only an odd whole n takes x < 0")
+    return np.sign(x) * np.abs(x) ** (1 / n)
+
+
 MATH = {
     "sin": np.sin, "cos": np.cos, "tan": np.tan,
     "asin": np.arcsin, "acos": np.arccos, "atan": np.arctan,
     "sinh": np.sinh, "cosh": np.cosh, "tanh": np.tanh,
-    "exp": np.exp, "log": np.log, "log10": np.log10, "sqrt": np.sqrt,
+    "exp": np.exp, "log": np.log, "log10": np.log10, "sqrt": np.sqrt, "root": root,
     "abs": np.abs, "sign": np.sign, "floor": np.floor, "ceil": np.ceil, "round": np.round,
     "min": np.minimum, "max": np.maximum,
 }
@@ -97,7 +112,7 @@ def normalise(text: str) -> str:
 
 SHAPES = ("step", "pulse", "ramp", "gauss", "hann", "chirp")
 # Number of arguments of every function (the math ones take 1 unless listed).
-ARITY = {"min": 2, "max": 2, "step": 1, "pulse": 2, "ramp": 2, "gauss": 2, "hann": 2, "chirp": 4, "data": 1}
+ARITY = {"min": 2, "max": 2, "root": 2, "step": 1, "pulse": 2, "ramp": 2, "gauss": 2, "hann": 2, "chirp": 4, "data": 1}
 NAMES = ("t", *CONSTANTS, *MATH, *SHAPES, "data")
 
 
@@ -181,7 +196,7 @@ def evaluate_formula(text: str, t: np.ndarray, source: SourceData | None = None)
             raise FormulaError("data() needs a file - open one with Open...")
         return source.channel(n, t)
 
-    names = {"t": t, **CONSTANTS, **MATH, **_shapes(t), "data": data}
+    names = {"t": t, **CONSTANTS, **MATH, "root": lambda x, n: root(x, n, t), **_shapes(t), "data": data}
     try:
         with np.errstate(all="ignore"):
             value = eval(compile(tree, "<formula>", "eval"), {"__builtins__": {}}, names)  # checked above
@@ -194,7 +209,8 @@ def evaluate_formula(text: str, t: np.ndarray, source: SourceData | None = None)
         raise FormulaError(str(e)) from None
     if not np.isfinite(value).all():
         bad = t[~np.isfinite(value)][0]
-        raise FormulaError(f"not a finite number at t = {bad * 1000:g} ms (e.g. division by 0)")
+        raise FormulaError(f"not a finite number at t = {bad * 1000:g} ms "
+                           "(e.g. division by 0, log of 0, a fractional power of a negative number)")
     return value
 
 

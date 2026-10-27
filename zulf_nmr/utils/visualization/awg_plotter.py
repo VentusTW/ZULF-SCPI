@@ -51,7 +51,8 @@ def plot_awg(
     for ch, (ax, range_, colour) in enumerate(zip(axes, waveform.ranges, CHANNEL_COLOURS), start=1):
         full_scale_mA = RANGE_FULL_SCALE_A[range_] * 1000
         values_mA = waveform.currents_A[:, ch - 1] * 1000
-        ax.step(t_ms, values_mA, where="post", color=colour, linewidth=1.2)
+        # Straight lines between the samples, not a staircase: the curve, not the DAC steps.
+        ax.plot(t_ms, values_mA, color=colour, linewidth=1.4, solid_joinstyle="round", antialiased=True)
         ax.axhline(0, color="#D0D0D0", linewidth=0.8, zorder=0)
         ax.set_ylim(*_y_range(values_mA, full_scale_mA))
         range_name = "LOW" if range_ == AwgRange.LOW else "HIGH"
