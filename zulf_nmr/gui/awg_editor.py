@@ -21,12 +21,14 @@ from zulf_nmr.hardware.awg_formula import (
     open_for_editing,
     save_waveform,
 )
+from zulf_nmr.gui import user_settings
 from zulf_nmr.gui.formula_hint import GhostText
 from zulf_nmr.gui.tooltip import Tooltip
 from zulf_nmr.utils.visualization.awg_plotter import plot_awg
 
 _COLOR_ERROR = "#d0342c"
 _RANGES = {"HIGH (1 A)": AwgRange.HIGH, "LOW (10 mA)": AwgRange.LOW}
+_SETTINGS = "awg_editor"  # section of the saved settings
 
 # Calculator keypad: groups of keys, side by side; every key inserts its text
 # ("<" = backspace, "C" = clear the formula), "" leaves a gap.
@@ -104,11 +106,19 @@ class AwgEditor(tk.Toplevel):
         self._errors: list[str] = []
         self._source: SourceData | None = None  # samples of the opened file, for data(n)
 
-        self._rate = tk.StringVar(value="10000")
-        self._duration = tk.StringVar(value="50")
-        self._formulas = [tk.StringVar() for _ in range(N_CHANNELS)]
-        self._ranges = [tk.StringVar(value="HIGH (1 A)") for _ in range(N_CHANNELS)]
-        self._formulas[0].set("200*pulse(5*ms, 15*ms)")
+        # What was typed last time, or the defaults.
+        saved = user_settings.load_section(_SETTINGS)
+        formulas = saved.get("formulas")
+        if not (isinstance(formulas, list) and len(formulas) == N_CHANNELS
+                and all(isinstance(f, str) for f in formulas)):
+            formulas = ["200*pulse(5*ms, 15*ms)"] + [""] * (N_CHANNELS - 1)
+        ranges = saved.get("ranges")
+        if not (isinstance(ranges, list) and len(ranges) == N_CHANNELS and all(r in _RANGES for r in ranges)):
+            ranges = ["HIGH (1 A)"] * N_CHANNELS
+        self._rate = tk.StringVar(value=user_settings.text(saved, "sample_rate_hz", "10000"))
+        self._duration = tk.StringVar(value=user_settings.text(saved, "duration_ms", "50"))
+        self._formulas = [tk.StringVar(value=f) for f in formulas]
+        self._ranges = [tk.StringVar(value=r) for r in ranges]
 
         self._build_ui()
         for var in (self._rate, self._duration, *self._formulas, *self._ranges):
@@ -116,6 +126,16 @@ class AwgEditor(tk.Toplevel):
         self._active = self._entries[0]
         self._entries[0].focus_set()
         self._update()
+
+    def destroy(self) -> None:
+        """Close - also when the main window closes - remembering what was typed."""
+        user_settings.save_section(_SETTINGS, {
+            "sample_rate_hz": self._rate.get(),
+            "duration_ms": self._duration.get(),
+            "ranges": [r.get() for r in self._ranges],
+            "formulas": [f.get() for f in self._formulas],
+        })
+        super().destroy()
 
     # -------------------------------------------------------------------- UI
 

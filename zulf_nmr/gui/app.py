@@ -34,6 +34,7 @@ from zulf_nmr.experiment.history import HistoryError, load_results
 from zulf_nmr.experiment.runner import ExperimentAborted
 from zulf_nmr.experiment.sequence import acquisition_window_ms
 from zulf_nmr.experiment.schedule import QueueItem, QueueRunner, ResultGroup, Transient, format_delay
+from zulf_nmr.gui import user_settings
 from zulf_nmr.gui.awg_editor import AwgEditor
 from zulf_nmr.gui.preview import PlotPreview
 from zulf_nmr.gui.queue_editor import QueueEditor
@@ -59,6 +60,8 @@ _LOG_POLL_MS = 100
 _MAX_LOG_LINE = 300  # longer console lines (e.g. echoed binary data) are cut
 _COLOR_OK = "#2e9e44"
 _COLOR_FAIL = "#d0342c"
+_SETTINGS = "main_window"  # section of the saved settings
+_MAX_SAVED_HISTORY = 100  # console commands remembered for the next start
 
 
 def load_system_settings(path: Path = DEFAULT_SYSTEM_CONFIG) -> tuple[SystemConfig, str]:
@@ -101,6 +104,7 @@ class App(tk.Tk):
         self._build_ui()
         self._log("info", source)
         self._apply_settings_to_fields(self._settings)
+        self._restore_typed()
         try:
             self._ensure_results_dir()
         except OSError:
@@ -190,6 +194,31 @@ class App(tk.Tk):
         self._port.set(settings.port)
         self._baud.delete(0, "end")
         self._baud.insert(0, str(settings.baudrate))
+
+    def _restore_typed(self) -> None:
+        """Put back what the user typed last time: it wins over system.json."""
+        saved = user_settings.load_section(_SETTINGS)
+        port = user_settings.text(saved, "port", self._port.get())
+        baud = user_settings.text(saved, "baudrate", self._baud.get())
+        if (port, baud) != (self._port.get(), self._baud.get()):
+            self._port.set(port)
+            self._baud.delete(0, "end")
+            self._baud.insert(0, baud)
+            self._log("info", f"Using the last port: {port}, {baud} baud")
+        if isinstance(saved.get("simulation"), bool):
+            self._simulate.set(saved["simulation"])
+        history = saved.get("command_history")
+        if isinstance(history, list):
+            self._history = [c for c in history if isinstance(c, str)][-_MAX_SAVED_HISTORY:]
+            self._history_pos = len(self._history)
+
+    def _save_typed(self) -> None:
+        user_settings.save_section(_SETTINGS, {
+            "port": self._port.get().strip(),
+            "baudrate": self._baud.get().strip(),
+            "simulation": self._simulate.get(),
+            "command_history": self._history[-_MAX_SAVED_HISTORY:],
+        })
 
     def _set_status(self, connected: bool) -> None:
         self._status_icon.itemconfig(self._status_dot, fill=_COLOR_OK if connected else _COLOR_FAIL)
@@ -606,6 +635,7 @@ class App(tk.Tk):
         if self._runner is not None:
             self._runner.abort()
         self._disconnect(quiet=True)
+        self._save_typed()
         self.destroy()
 
 
