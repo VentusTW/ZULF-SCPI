@@ -14,7 +14,12 @@ from matplotlib.widgets import SpanSelector
 
 from zulf_nmr.experiment.schedule import QueueResult, ResultGroup, Transient
 from zulf_nmr.gui.tooltip import Tooltip
-from zulf_nmr.utils.visualization.results_plotter import draw_spectrum, draw_time
+from zulf_nmr.utils.visualization.results_plotter import (
+    draw_spectrum,
+    draw_time,
+    smooth_for_display,
+    visible_points,
+)
 
 ROW_SIZE_IN = (11.0, 3.6)  # starting size; rows are stretched to the width of the window
 SELECTION_COLOUR = "#999999"
@@ -91,6 +96,8 @@ class TraceRow:
         self._auto_ylim: tuple[float, float] | None = None  # only grows, so a growing trace does not jump
         self._drawing = False  # limits are being set by the program, not by the user
         self._spectrum = (np.zeros(1), np.zeros((1, len(channels))))
+        self._smooth = (np.zeros(0), np.zeros((0, len(channels))))  # smoothed trace, all of it
+        self._channel_lines: list = []  # the drawn curves, one per channel
         self.on_scroll = on_scroll  # wheel without a modifier scrolls the list of rows
 
         # frame = header (toggle button + name, toolbar) above the plots; the frame is what is packed.
@@ -132,6 +139,7 @@ class TraceRow:
         self._cursor_x: dict[str, list[float | None]] = {"time": [None, None], "spec": [None, None]}
         self._cursor_plot = "time"  # the plot whose cursors the readout describes
         self._dragged_cursor: tuple[str, int] | None = None
+        self._background = None  # picture without the cursors while one is dragged
 
     def _layout(self) -> None:
         """Place both plots with fixed margins (in pixels) for the current figure size."""
@@ -142,6 +150,7 @@ class TraceRow:
         bottom, plot_h = m["bottom"] / height, max(height - m["top"] - m["bottom"], 20) / height
         self.ax_time.set_position((m["left"] / width, bottom, time_w / width, plot_h))
         self.ax_spec.set_position(((m["left"] + time_w + m["gap"]) / width, bottom, spec_w / width, plot_h))
+        self._thin_lines()  # as many points as the plot is now wide
 
     # ------------------------------------------------------------------ drawing
 
@@ -149,20 +158,47 @@ class TraceRow:
         """Draw new data (a new trace, or an updated average); the selected range, the
         zoom and the cursors are kept. live: the trace is still growing."""
         self.data, self.title, self.live = data, title, live
+        self._background = None  # new data: a cursor being dragged is drawn the slow way
         self._name.config(text=title.replace("\n", "  —  "))
+        # Smoothed once per data; only the part in view, thinned to the plot's width, is drawn.
+        t, values = smooth_for_display(data.reshape(len(data), -1), self.rate)
+        self._smooth = (t + self.start_s, values)
+        points = visible_points(*self._smooth, self._time_xlim(), self.ax_time.bbox.width)
         self._drawing = True
         try:
-            draw_time(self.ax_time, data, self.rate, self.channels, title, self.average, None, self.start_s)
+            draw_time(self.ax_time, data, self.rate, self.channels, title, self.average, None, self.start_s,
+                      points)
+            self._channel_lines = self.ax_time.lines[:len(self.channels)]
             self._set_time_limits()
             self._draw_cursors("time")
         finally:
             self._drawing = False
         self._watch_limits(self.ax_time, "time")
+        self.ax_time.callbacks.connect("xlim_changed", lambda _ax: self._thin_lines())
         self._draw_spectrum()
         # ax.clear() removes the selector's artists, so a new one is made for every redraw.
         self._new_selector()
         self._update_readout()
         self.canvas.draw_idle()
+
+    def _time_xlim(self) -> tuple[float, float]:
+        """The user's time range, or from the sequence start (0) to the newest sample:
+        the axis widens as the samples of a transient arrive."""
+        if "time" in self._user_limits:
+            return self._user_limits["time"][0]
+        end = self.start_s + len(self.data) / self.rate
+        if end <= self.start_s:
+            end = max(self.total_s, self.start_s + 1 / self.rate)
+        return 0.0, end
+
+    def _thin_lines(self) -> None:
+        """Give the channel lines the points of the time range now in view (after a zoom,
+        a pan or a resize): drawing then costs the same at any zoom."""
+        if not self._channel_lines:
+            return
+        t, values = visible_points(*self._smooth, self.ax_time.get_xlim(), self.ax_time.bbox.width)
+        for column, line in enumerate(self._channel_lines):
+            line.set_data(t, values[:, column])
 
     def _set_time_limits(self) -> None:
         if "time" in self._user_limits:
@@ -170,12 +206,7 @@ class TraceRow:
             self.ax_time.set_xlim(*xlim)
             self.ax_time.set_ylim(*ylim)
             return
-        # From the sequence start (0) to the newest sample: the axis widens as the samples
-        # of a transient arrive.
-        end = self.start_s + len(self.data) / self.rate
-        if end <= self.start_s:
-            end = max(self.total_s, self.start_s + 1 / self.rate)
-        self.ax_time.set_xlim(0, end)
+        self.ax_time.set_xlim(*self._time_xlim())
         low, high = self.ax_time.get_ylim()  # autoscaled to the data
         if self._auto_ylim is not None:
             low, high = min(low, self._auto_ylim[0]), max(high, self._auto_ylim[1])
@@ -216,7 +247,7 @@ class TraceRow:
             self.selector.disconnect_events()
             self.selector.set_visible(False)
         self.selector = SpanSelector(
-            self.ax_time, self._on_select, "horizontal", useblit=False, interactive=True,
+            self.ax_time, self._on_select, "horizontal", useblit=True, interactive=True,
             drag_from_anywhere=True, button=1, grab_range=EDGE_GRAB_PX,
             props=dict(facecolor=SELECTION_COLOUR, alpha=0.25),
         )
@@ -288,7 +319,7 @@ class TraceRow:
     def _on_release(self, event) -> None:
         if self._tool_active():
             return
-        self._dragged_cursor = None
+        self._end_cursor_drag()
         self._drag_cursor = None
         # The SpanSelector resets the cursor on release; show the one for where the mouse is.
         self.widget.after_idle(self._set_cursor, self._hover_cursor(event), True)
@@ -406,26 +437,54 @@ class TraceRow:
             a, b = self._cursor_x[plot]
             index = 0 if a is None else 1 if b is None else (0 if abs(a - event.xdata) <= abs(b - event.xdata) else 1)
         self._dragged_cursor = (plot, index)
-        self._move_cursor(plot, index, event.xdata)
+        self._cursor_x[plot][index] = event.xdata
+        self._cursor_plot = plot
+        # While dragging, only the cursors are redrawn over a saved picture of the rest
+        # (blitting): a full redraw of a long trace is too slow to follow the mouse.
+        self._draw_cursors(plot, animated=True)
+        self.canvas.draw()
+        self._background = self.canvas.copy_from_bbox(self.figure.bbox)
+        self._blit_cursors(plot)
+        self._update_readout()
+
+    def _end_cursor_drag(self) -> None:
+        if self._dragged_cursor is not None:
+            self._draw_cursors(self._dragged_cursor[0])  # part of the picture again
+            self.canvas.draw_idle()
+        self._dragged_cursor = None
+        self._background = None
 
     def _move_cursor(self, plot: str, index: int, x: float) -> None:
         self._cursor_x[plot][index] = x
         self._cursor_plot = plot
-        self._draw_cursors(plot)
+        if self._background is not None:
+            self._draw_cursors(plot, animated=True)
+            self._blit_cursors(plot)
+        else:
+            self._draw_cursors(plot)
+            self.canvas.draw_idle()
         self._update_readout()
-        self.canvas.draw_idle()
 
-    def _draw_cursors(self, plot: str) -> None:
+    def _blit_cursors(self, plot: str) -> None:
+        ax = self._axes(plot)
+        self.canvas.restore_region(self._background)
+        for artist in (*ax.lines, *ax.texts):
+            if artist.get_gid() == "cursor":
+                ax.draw_artist(artist)
+        self.canvas.blit(self.figure.bbox)
+
+    def _draw_cursors(self, plot: str, animated: bool = False) -> None:
         ax = self._axes(plot)
         for artist in [a for a in (*ax.lines, *ax.texts) if a.get_gid() == "cursor"]:
             artist.remove()
         for name, x in zip("AB", self._cursor_x[plot]):
             if x is None:
                 continue
-            line = ax.axvline(x, color=CURSOR_COLOUR, linewidth=1.0, linestyle="-" if name == "A" else "--")
+            line = ax.axvline(x, color=CURSOR_COLOUR, linewidth=1.0, linestyle="-" if name == "A" else "--",
+                              animated=animated)
             label = ax.annotate(name, (x, 1.0), xycoords=("data", "axes fraction"), xytext=(3, -3),
                                 textcoords="offset points", va="top", fontsize=8, color=CURSOR_COLOUR,
-                                fontweight="bold", annotation_clip=True)
+                                fontweight="bold", annotation_clip=True, animated=animated)
             line.set_gid("cursor")
             label.set_gid("cursor")
 

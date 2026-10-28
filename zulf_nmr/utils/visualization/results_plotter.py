@@ -27,6 +27,31 @@ def smooth_for_display(data: np.ndarray, sample_rate_hz: float) -> tuple[np.ndar
     return np.arange(m) / (sample_rate_hz * factor), values
 
 
+def visible_points(t: np.ndarray, values: np.ndarray, xlim: tuple[float, float],
+                   width_px: float) -> tuple[np.ndarray, np.ndarray]:
+    """The points of (t, values) worth drawing in xlim on width_px pixels.
+
+    When there are many more points than pixels, every pixel gets the lowest and the
+    highest value in it: the curve looks the same, but drawing it takes a few thousand
+    points instead of hundreds of thousands (each pan, zoom or drag redraws it).
+    """
+    i0 = max(int(np.searchsorted(t, xlim[0])) - 1, 0)
+    i1 = min(int(np.searchsorted(t, xlim[1])) + 1, len(t))
+    seg_t, seg_v = t[i0:i1], values[i0:i1]
+    bins = max(int(width_px), 1)
+    if len(seg_t) <= 4 * bins:
+        return seg_t, seg_v
+    per_bin = len(seg_t) // bins
+    m = per_bin * bins
+    v = seg_v[:m].reshape(bins, per_bin, -1)
+    tt = seg_t[:m].reshape(bins, per_bin)
+    out_t = np.empty(2 * bins)
+    out_t[0::2], out_t[1::2] = tt[:, 0], tt[:, -1]
+    out_v = np.empty((2 * bins, v.shape[2]))
+    out_v[0::2], out_v[1::2] = v.min(axis=1), v.max(axis=1)
+    return np.concatenate([out_t, seg_t[m:]]), np.concatenate([out_v, seg_v[m:].reshape(-1, v.shape[2])])
+
+
 def channel_colour(channel: int) -> str:
     return CHANNEL_COLOURS.get(channel, "#7F7F7F")
 
@@ -48,17 +73,21 @@ def spectrum(data: np.ndarray, sample_rate_hz: float) -> tuple[np.ndarray, np.nd
 
 def draw_time(ax: Axes, data: np.ndarray, sample_rate_hz: float, channels: tuple[int, ...],
               title: str, average: bool = False, xlim: tuple[float, float] | None = None,
-              start_s: float = 0.0) -> None:
+              start_s: float = 0.0, points: tuple[np.ndarray, np.ndarray] | None = None) -> None:
     """All channels of one trace on one plot, one colour per channel, with a legend.
 
     The time axis counts from the start of the sequence; the first sample is at
     start_s (the acquisition start), so the plot is empty before it. The curves
-    are smoothed for drawing (smooth_for_display); xlim is the shown range in seconds.
+    are smoothed for drawing (smooth_for_display), or points = (t, values) is drawn
+    instead; xlim is the shown range in seconds.
     """
     ax.clear()
     data = data.reshape(len(data), -1)
-    t, values = smooth_for_display(data, sample_rate_hz)
-    t = t + start_s
+    if points is None:
+        t, values = smooth_for_display(data, sample_rate_hz)
+        t = t + start_s
+    else:
+        t, values = points
     for col, channel in enumerate(channels):
         ax.plot(t, values[:, col], color=channel_colour(channel), linewidth=1.0, label=f"CH{channel}")
     if start_s > 0:
