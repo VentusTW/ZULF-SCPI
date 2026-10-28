@@ -34,14 +34,19 @@ def plot_awg(
 ) -> Figure | SubFigure:
     """Draw one row per AWG channel: current in mA versus time in ms after :AWG:RUN.
 
-    The y range of every row is the full scale of its AWG range. acquisition =
-    (start_ms, end_ms, ADC channels) shades the recording window; the time axis
-    shows the whole waveform and the start of the acquisition, a longer
-    acquisition is marked as continuing to its end.
+    The y range of every row fits its values. acquisition = (start_ms, end_ms, ADC
+    channels) is drawn as a bar in a strip above the channels and as dashed lines at
+    its start and end; the time axis shows the whole waveform and the start of the
+    acquisition (zoom out to see a longer acquisition to its end).
     """
     if fig is None:
         fig = plt.figure(figsize=(11, 7))
-    axes = fig.subplots(len(waveform.ranges), 1, sharex=True)
+    n = len(waveform.ranges)
+    if acquisition is None:
+        axes = fig.subplots(n, 1, sharex=True)
+    else:
+        # A thin strip above the channels shows the acquisition, so nothing covers the curves.
+        strip, *axes = fig.subplots(n + 1, 1, sharex=True, height_ratios=[0.3] + [1] * n)
     t_ms = waveform.time_s() * 1000
     awg_end = waveform.duration_s * 1000
     view_end = awg_end
@@ -63,15 +68,19 @@ def plot_awg(
 
     if acquisition is not None:
         start, end, channels = acquisition
-        for ax in axes:
-            ax.axvspan(start, min(end, view_end * 1.02), color=ACQUISITION_COLOUR, alpha=0.12, zorder=0)
-            ax.axvline(start, color=ACQUISITION_COLOUR, linewidth=1.0, linestyle="--")
-        more = f", continues to {end / 1000:g} s" if end > view_end * 1.02 else ""
-        axes[0].annotate(
-            f"Acquisition CH {', '.join(map(str, channels))}: from {start:g} ms{more}",
-            (start, 1.0), xycoords=("data", "axes fraction"), xytext=(4, -2), textcoords="offset points",
-            va="top", fontsize=8, color=ACQUISITION_COLOUR, fontweight="bold",
-        )
+        strip.broken_barh([(start, end - start)], (0.2, 0.6), facecolors=ACQUISITION_COLOUR, alpha=0.35,
+                          edgecolors=ACQUISITION_COLOUR, linewidth=1.0)
+        strip.set_ylim(0, 1)
+        strip.set_yticks([])
+        strip.tick_params(axis="x", bottom=False)
+        for side in ("top", "right", "left"):
+            strip.spines[side].set_visible(False)
+        # In the strip's title: it stays in place when the plot is zoomed or the window resized.
+        strip.set_title(f"Acquisition CH {', '.join(map(str, channels))}: {start:g} – {end:g} ms",
+                        loc="left", fontsize=8, color=ACQUISITION_COLOUR, fontweight="bold", pad=2)
+        for ax in axes:  # thin lines only: the curves stay visible
+            ax.axvline(start, color=ACQUISITION_COLOUR, linewidth=1.0, linestyle="--", zorder=1)
+            ax.axvline(end, color=ACQUISITION_COLOUR, linewidth=1.0, linestyle="--", zorder=1)
     axes[-1].set_xlim(-0.02 * view_end, view_end * 1.02)
     axes[-1].set_xlabel("Time after :AWG:RUN (ms)", fontweight="bold")
     name = waveform.source_path.name if waveform.source_path else "AWG sequence"

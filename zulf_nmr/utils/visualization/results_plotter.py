@@ -74,9 +74,9 @@ def draw_time(ax: Axes, data: np.ndarray, sample_rate_hz: float, channels: tuple
 
 def draw_spectrum(ax: Axes, data: np.ndarray, sample_rate_hz: float, channels: tuple[int, ...],
                   t_range: tuple[float, float] | None = None, average: bool = False,
-                  start_s: float = 0.0) -> None:
+                  start_s: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
     """Spectrum of the samples in t_range (seconds from the start of the sequence, None = all);
-    start_s is the time of the first sample."""
+    start_s is the time of the first sample. Returns what is drawn: (frequencies, amplitudes)."""
     ax.clear()
     data = data.reshape(len(data), -1)
     i0, i1 = 0, len(data)
@@ -93,6 +93,7 @@ def draw_spectrum(ax: Axes, data: np.ndarray, sample_rate_hz: float, channels: t
     ax.set_ylabel("Amplitude", fontsize=8)
     ax.set_xlim(0, sample_rate_hz / 2)
     _style(ax, average)
+    return freqs, amplitude
 
 
 def _style(ax: Axes, average: bool) -> None:

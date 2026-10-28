@@ -89,6 +89,7 @@ def plot_events(
     t_max = max(ends, default=0) or 1
     rows = range(n_rows, 0, -1)
     used: dict[str, str] = {}
+    side_labels = []  # (label right of the plot, its row): hidden when the row is zoomed out of view
 
     for y, event, duration in zip(rows, events, durations):
         name, colour = event_category(event.action)
@@ -101,12 +102,12 @@ def plot_events(
         label = f"{event.time_ms:g} ms" + (f"  (+{duration:g} ms)" if duration else "")
         ax.annotate(
             label, (event.time_ms + (duration or 0), y), xytext=(6, 0),
-            textcoords="offset points", va="center", fontsize=8, color="#404040",
+            textcoords="offset points", va="center", fontsize=8, color="#404040", clip_on=True,
         )
-        ax.annotate(
+        side_labels.append((ax.annotate(
             event.action, (1.01, y), xycoords=("axes fraction", "data"),
             va="center", fontsize=8, family="monospace", color=colour,
-        )
+        ), y))
 
     if acquisition:
         y = 1
@@ -116,16 +117,23 @@ def plot_events(
         channels = ", ".join(map(str, acquisition.channels))
         ax.annotate(
             f"{acquisition.start_ms:g} – {acquisition.end_ms:g} ms", (acquisition.start_ms, y),
-            xytext=(4, 0), textcoords="offset points", va="center", fontsize=8, color="#404040",
+            xytext=(4, 0), textcoords="offset points", va="center", fontsize=8, color="#404040", clip_on=True,
         )
-        ax.annotate(
+        side_labels.append((ax.annotate(
             f"Acquisition, CH {channels}", (1.01, y), xycoords=("axes fraction", "data"),
             va="center", fontsize=8, family="monospace", color=ACQUISITION_COLOUR, fontweight="bold",
-        )
+        ), y))
         used.setdefault("Acquisition", ACQUISITION_COLOUR)
 
     ax.set_xlim(-0.03 * t_max, 1.12 * t_max)
     ax.set_ylim(0.3, n_rows + 0.7)
+
+    def show_rows_in_view(ax_: Axes) -> None:
+        low, high = sorted(ax_.get_ylim())
+        for text, row in side_labels:
+            text.set_visible(low <= row <= high)
+
+    ax.callbacks.connect("ylim_changed", show_rows_in_view)
     ax.set_yticks([])
     ax.set_xlabel("Time (ms)", fontweight="bold")
     ax.set_ylabel("Event", fontweight="bold")
