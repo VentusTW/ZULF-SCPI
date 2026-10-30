@@ -5,8 +5,9 @@ from __future__ import annotations
 import numpy as np
 from matplotlib.axes import Axes
 
-# Okabe-Ito, by ADC channel number.
-CHANNEL_COLOURS = {1: "#0072B2", 2: "#E69F00", 3: "#009E73", 4: "#CC79A7"}
+# Okabe-Ito (and black, dark grey for the last two), by ADC channel number.
+CHANNEL_COLOURS = {1: "#0072B2", 2: "#E69F00", 3: "#009E73", 4: "#CC79A7",
+                   5: "#D55E00", 6: "#56B4E9", 7: "#000000", 8: "#7F7F7F"}
 AVERAGE_BACKGROUND = "#FFF6EE"
 _MAX_POINTS = 200000  # longer traces are decimated for drawing only (not for the spectrum)
 _SMOOTH_FACTOR = 8  # drawn points per sample (fewer for long traces, see smooth_for_display)

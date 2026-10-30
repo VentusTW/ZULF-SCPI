@@ -132,12 +132,26 @@ class SCPIConnection:
         self._send(command.encode("ascii") + self.TERMINATOR)
 
     def write_binary(self, command: str, payload: bytes) -> None:
-        """Send a command followed by a #<hdr><bin> block, e.g. :AWG:DATA."""
+        """Send a command followed by a #<hdr><bin> block."""
+        self._send(self._with_block(command, payload))
+
+    def query_block(self, command: str, payload: bytes, timeout_s: float | None = None) -> str:
+        """Send a query with a #<hdr><bin> argument (e.g. :AWG:DATA? #...) and return its text reply."""
+        reply = self._query(command, timeout_s, self._with_block(command, payload))
+        if not isinstance(reply, str):
+            raise TypeError(f"Expected text reply to {command!r}, got binary block")
+        return reply
+
+    def query_any(self, command: str, timeout_s: float | None = None) -> Message:
+        """Send a query whose reply is either text (e.g. err-1) or a #<hdr><bin> block (bytes)."""
+        return self._query(command, timeout_s)
+
+    def _with_block(self, command: str, payload: bytes) -> bytes:
         length = str(len(payload)).encode("ascii")
         if len(length) > 9:
             raise ValueError("Binary block too large for a definite-length header")
         header = b"#" + str(len(length)).encode("ascii") + length
-        self._send(command.encode("ascii") + b" " + header + payload + self.TERMINATOR)
+        return command.encode("ascii") + b" " + header + payload + self.TERMINATOR
 
     def query(self, command: str, timeout_s: float | None = None) -> str:
         """Send a query and return the text reply without the terminator."""
@@ -153,7 +167,8 @@ class SCPIConnection:
             raise TypeError(f"Expected binary block in reply to {command!r}, got {reply!r}")
         return reply
 
-    def _query(self, command: str, timeout_s: float | None) -> Message:
+    def _query(self, command: str, timeout_s: float | None, data: bytes | None = None) -> Message:
+        """Send command (or data, the whole message when it carries a block) and wait for the reply."""
         with self._lock:
             # Anything still queued arrived unrequested; it has already been
             # passed to on_message, so drop it to keep replies in step.
@@ -163,7 +178,10 @@ class SCPIConnection:
                 except queue.Empty:
                     break
                 log.debug("Discarding unrequested message: %r", stale)
-            self.write(command)
+            if data is None:
+                self.write(command)
+            else:
+                self._send(data)
             timeout = self.timeout_s if timeout_s is None else timeout_s
             try:
                 return self._replies.get(timeout=timeout)

@@ -2,27 +2,41 @@
 
 from __future__ import annotations
 
+import logging
 import math
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+from zulf_nmr.core.binary_block import BlockError, error_code, parse_block
 
 if TYPE_CHECKING:
     from zulf_nmr.core.connection import SCPIConnection
 
-# ASSUMED - the SCPI dictionary has no ADC channel commands. The ADC has 4
-# detection channels and always records all of them; one sample (frame) is
-# 4 little-endian int16 values, channel 1 first. Channels not selected in the
-# experiment file are dropped on the PC.
-ADC_CHANNELS = (1, 2, 3, 4)
-FRAME_DTYPE = np.dtype(("<i2", len(ADC_CHANNELS)))
+log = logging.getLogger(__name__)
+
+# :ACQuire:DATA:GET? <index> answers #<hdr><bin> (awg_acquire_data.md) with header version 2
+# (its chunk index is the one asked for) and payload version 2: samples of 8 channels,
+# UInt16 little-endian, channel 1 first, one sample after another. The ADC always records
+# all channels; those not selected in the experiment file are dropped on the PC.
+ADC_CHANNELS = (1, 2, 3, 4, 5, 6, 7, 8)
+ACQ_PAYLOAD_VERSION = 2
+FRAME_DTYPE = np.dtype(("<u2", len(ADC_CHANNELS)))
+# err-<code> replies of :ACQuire:DATA:GET?
+ACQ_ERRORS = {1: "invalid chunk index", 255: "general error"}
+# A chunk that arrives damaged (or not at all) is asked for again this many times.
+CHUNK_RETRIES = 3
+
+
+class ChunkNotAvailable(LookupError):
+    """err-1: the device has no chunk with that index (not recorded yet, or past the end)."""
 
 
 def decode_frames(data: bytes) -> np.ndarray:
-    """(N, 4) array of raw ADC values from whole frames; len(data) must be a multiple of the frame size."""
+    """(N, 8) array of raw ADC values from whole frames; len(data) must be a multiple of the frame size."""
     if len(data) % FRAME_DTYPE.itemsize:
         raise ValueError(f"{len(data)} bytes is not a whole number of {FRAME_DTYPE.itemsize}-byte frames")
-    return np.frombuffer(data, dtype="<i2").reshape(-1, len(ADC_CHANNELS)).astype(float)
+    return np.frombuffer(data, dtype="<u2").reshape(-1, len(ADC_CHANNELS)).astype(float)
 
 
 def duration_for_samples(number_of_samples: int, sample_rate_hz: float) -> int:
@@ -89,27 +103,37 @@ class Acquisition:
 
     # ------------------------------------------------------------------ data
 
-    def fetch_new_chunk(self) -> bytes:
-        """:ACQuire:DATa:NEW? - drop the last chunk from the buffer, return the oldest one."""
-        return self._conn.query_binary(":ACQ:DAT:NEW?", self.data_timeout_s)
+    def fetch_chunk(self, index: int) -> np.ndarray:
+        """:ACQuire:DATA:GET? <index> - the samples of chunk index, shape (N, 8).
 
-    def repeat_chunk(self) -> bytes:
-        """:ACQuire:DATa:REPeat? - resend the oldest chunk without removing anything."""
-        return self._conn.query_binary(":ACQ:DAT:REP?", self.data_timeout_s)
-
-    def fetch_chunk(self, is_valid: Callable[[bytes], bool], retries: int = 3) -> bytes:
-        """Fetch the next chunk; while is_valid() rejects it, ask for a repeat.
-
-        is_valid is the checksum test - the checksum format is not defined yet.
+        The same index can be asked for again at no risk, so a damaged chunk (bad checksum,
+        wrong index) or a lost answer is simply requested again. Raises ChunkNotAvailable
+        on err-1.
         """
-        chunk = self.fetch_new_chunk()
-        for _ in range(retries):
-            if is_valid(chunk):
-                return chunk
-            chunk = self.repeat_chunk()
-        if is_valid(chunk):
-            return chunk
-        raise IOError(f"Data chunk failed validation after {retries} repeats")
+        command = f":ACQ:DATA:GET? {index}"
+        problem = ""
+        for _ in range(CHUNK_RETRIES + 1):
+            try:
+                reply = self._conn.query_any(command, self.data_timeout_s)
+            except TimeoutError:
+                problem = "no answer"
+                continue
+            if isinstance(reply, str):
+                code = error_code(reply)
+                if code == 1:
+                    raise ChunkNotAvailable(f"chunk {index} is not available")
+                raise IOError(f"{command}: err-{code} ({ACQ_ERRORS.get(code, 'unknown error')})")
+            try:
+                block = parse_block(reply)
+                if block.chunk_index is not None and block.chunk_index != index:
+                    raise BlockError(f"got chunk {block.chunk_index} instead of {index}")
+                if block.payload_version != ACQ_PAYLOAD_VERSION:
+                    raise BlockError(f"payload version {block.payload_version} is not supported")
+                return decode_frames(block.payload)
+            except (BlockError, ValueError) as e:
+                problem = str(e)
+                log.warning("%s: %s - asked again", command, problem)
+        raise IOError(f"{command}: {problem} after {CHUNK_RETRIES} repeats")
 
     # -------------------------------------------------------------- helpers
 

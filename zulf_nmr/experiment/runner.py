@@ -16,7 +16,7 @@ import numpy as np
 from zulf_nmr.core.spectrometer import Spectrometer
 from zulf_nmr.experiment.parser import ExperimentConfig
 from zulf_nmr.experiment.sequence import CompiledSequence, compile_experiment
-from zulf_nmr.hardware.acquisition import FRAME_DTYPE, decode_frames
+from zulf_nmr.hardware.acquisition import ChunkNotAvailable
 from zulf_nmr.hardware.awg import AwgWaveform
 
 log = logging.getLogger(__name__)
@@ -46,8 +46,6 @@ class ExperimentRunner:
         spectrometer: Spectrometer,
         config: ExperimentConfig,
         output_dir: str | Path | None = None,
-        decode: Callable[[bytes], np.ndarray] = decode_frames,
-        is_valid_chunk: Callable[[bytes], bool] = lambda chunk: True,
         poll_s: float = 0.05,
         timeout_margin_s: float = 30.0,
         on_progress: Callable[[int, int, int], None] | None = None,
@@ -64,8 +62,6 @@ class ExperimentRunner:
         self.spec = spectrometer
         self.config = config
         self.output_dir = Path(output_dir) if output_dir is not None else spectrometer.data_output
-        self.decode = decode
-        self.is_valid_chunk = is_valid_chunk
         self.poll_s = poll_s
         self.timeout_margin_s = timeout_margin_s
         self.on_progress = on_progress
@@ -134,8 +130,8 @@ class ExperimentRunner:
         expected = self.expected_points
         deadline = time.monotonic() + self._max_duration_s()
         blocks: list[np.ndarray] = []
-        pending = b""  # a frame may be split between two chunks
         received = 0
+        chunk_index = 0  # of the next chunk to read (:ACQuire:DATA:GET? <index>)
         done = False
         columns = [ch - 1 for ch in self.config.acquisition.channels]
         last_data = 0.0
@@ -146,12 +142,12 @@ class ExperimentRunner:
                 raise TimeoutError(
                     f"Transient {index}: got {received}/{expected} points before the timeout"
                 )
-            chunk = self.spec.acquisition.fetch_chunk(self.is_valid_chunk)
-            if chunk:
-                pending += chunk
-                whole = len(pending) - len(pending) % FRAME_DTYPE.itemsize
-                samples = self.decode(pending[:whole])
-                pending = pending[whole:]
+            try:
+                samples = self.spec.acquisition.fetch_chunk(chunk_index)
+            except ChunkNotAvailable:
+                samples = None
+            if samples is not None:
+                chunk_index += 1
                 blocks.append(samples)
                 received += len(samples)
                 if self.on_progress:
@@ -160,7 +156,7 @@ class ExperimentRunner:
                     last_data = time.monotonic()
                     self.on_data(index, np.concatenate(blocks)[:expected, columns])
                 continue
-            # Buffer empty: finished, or the device has not produced more yet.
+            # No such chunk: finished, or the device has not recorded it yet.
             if done:
                 log.warning("Transient %d: sequence done with %d/%d points", index, received, expected)
                 break
