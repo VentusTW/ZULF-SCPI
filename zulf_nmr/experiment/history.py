@@ -13,7 +13,6 @@ from zulf_nmr.experiment.parser import ConfigError, HardwareLimits, parse_experi
 from zulf_nmr.experiment.schedule import QueueResult, ResultGroup, Transient
 from zulf_nmr.experiment.sequence import acquisition_window_ms
 
-# <stamp>_<name>_transient_<nnn>.<ext> / _average.<ext> / _config.json / _awg.npz
 _FILE = re.compile(r"^(?P<stamp>\d{8}_\d{6})_(?P<name>.+?)_"
                    r"(?:transient_(?P<number>\d{3})|(?P<kind>average|config|awg))\.(?P<ext>\w+)$")
 _CHANNEL = re.compile(r"^ch(\d+)$")
@@ -131,7 +130,7 @@ def _read_csv(path: Path) -> tuple[np.ndarray, tuple[int, ...], float]:
     channels = []
     for column in header[1:]:
         match = _CHANNEL.match(column)
-        channels.append(int(match[1]) if match else len(channels) + 1)  # e.g. old "signal" column
+        channels.append(int(match[1]) if match else len(channels) + 1)
     table = np.loadtxt(path, delimiter=",", skiprows=1, ndmin=2)
     if table.shape[1] != len(header):
         raise ValueError(f"{path.name}: {table.shape[1]} columns but {len(header)} names")
@@ -144,7 +143,6 @@ def _read_config(path: Path):
     with open(path, encoding="utf-8") as f:
         data = json.load(f)
     try:
-        # The copied AWG file is not where the config points to; it is not needed here.
         return parse_experiment(data, HardwareLimits(), base_dir=path.parent, check_files=False)
     except ConfigError as e:
         raise ValueError("; ".join(e.errors[:3])) from None

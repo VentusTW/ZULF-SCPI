@@ -52,8 +52,6 @@ class QueueEditor(tk.Toplevel):
         self.wait_window()
         return self._result
 
-    # -------------------------------------------------------------------- UI
-
     def _build_ui(self) -> None:
         bottom = ttk.Frame(self, padding=8)
         bottom.pack(side="bottom", fill="x")
@@ -109,8 +107,6 @@ class QueueEditor(tk.Toplevel):
         self._details = tk.Text(middle, height=7, wrap="word", state="disabled", font=("Consolas", 9))
         self._details.tag_config("error", foreground=_COLOR_ERROR)
         self._details.pack(side="top", fill="x")
-
-    # ------------------------------------------------------------- list view
 
     def _refresh(self) -> None:
         selected = self._selected_index()
@@ -197,8 +193,6 @@ class QueueEditor(tk.Toplevel):
                     self._details.insert("end", "No AWG sequence\n")
         self._details.config(state="disabled")
 
-    # ---------------------------------------------------------------- delays
-
     def _on_delay_changed(self) -> None:
         if self._updating_fields:
             return
@@ -224,8 +218,6 @@ class QueueEditor(tk.Toplevel):
             self._delay_msg.config(text="Not used - this is the last set", foreground="#666666")
         else:
             self._delay_msg.config(text="")
-
-    # --------------------------------------------------------------- actions
 
     def _add(self) -> None:
         paths = filedialog.askopenfilenames(
@@ -276,7 +268,7 @@ class QueueEditor(tk.Toplevel):
         if not self._items:
             messagebox.showerror("Empty queue", "Add at least one experiment configuration.", parent=self)
             return
-        for item in self._items:  # files may have changed since they were added
+        for item in self._items:
             item.reload(self._limits)
         self._refresh()
         problems = queue_errors(self._items)

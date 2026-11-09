@@ -48,7 +48,7 @@ def save_section(name: str, values: dict[str, Any]) -> None:
         temporary = SETTINGS_FILE.with_suffix(".tmp")
         with open(temporary, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-        temporary.replace(SETTINGS_FILE)  # never a half-written file
+        temporary.replace(SETTINGS_FILE)
     except OSError as e:
         log.warning("Settings not saved to %s: %s", SETTINGS_FILE, english_error(e))
 

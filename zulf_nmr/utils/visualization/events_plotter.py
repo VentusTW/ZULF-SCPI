@@ -8,7 +8,6 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
-import matplotlib.pyplot as plt
 from matplotlib.axes import Axes
 from matplotlib.figure import Figure, SubFigure
 from matplotlib.lines import Line2D
@@ -17,7 +16,6 @@ from matplotlib.patches import Rectangle
 from zulf_nmr.core.scpi import mnemonic_matches
 from zulf_nmr.experiment.parser import Event, ExperimentConfig
 
-# Subsystem -> (root mnemonic, colour). Okabe-Ito palette, colour-blind safe.
 CATEGORIES = {
     "Shim": ("SHIM", "#0072B2"),
     "Motor": ("MOTor", "#E69F00"),
@@ -79,6 +77,8 @@ def plot_events(
     durations = list(durations_ms) if durations_ms is not None else [None] * len(events)
     n_rows = len(events) + (1 if acquisition else 0)
     if ax is None:
+        import matplotlib.pyplot as plt
+
         fig, ax = plt.subplots(figsize=(11, 0.45 * n_rows + 2))
     else:
         fig = ax.figure
@@ -89,7 +89,7 @@ def plot_events(
     t_max = max(ends, default=0) or 1
     rows = range(n_rows, 0, -1)
     used: dict[str, str] = {}
-    side_labels = []  # (label right of the plot, its row): hidden when the row is zoomed out of view
+    side_labels = []
 
     for y, event, duration in zip(rows, events, durations):
         name, colour = event_category(event.action)
@@ -149,7 +149,7 @@ def plot_events(
     ax.set_title(f"Sequence timeline — {title}" if title else "Sequence timeline",
                  fontweight="bold", pad=28)
     if isinstance(fig, Figure) and fig.get_layout_engine() is None:
-        fig.tight_layout()  # sub-figures and constrained layouts arrange themselves
+        fig.tight_layout()
     return fig
 
 
@@ -168,6 +168,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.output:
         fig.savefig(args.output, dpi=150, bbox_inches="tight")
     else:
+        import matplotlib.pyplot as plt
+
         plt.show()
 
 

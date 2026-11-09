@@ -15,16 +15,10 @@ if TYPE_CHECKING:
 
 log = logging.getLogger(__name__)
 
-# :ACQuire:DATA:GET? <index> answers #<hdr><bin> (awg_acquire_data.md) with header version 2
-# (its chunk index is the one asked for) and payload version 2: samples of 8 channels,
-# UInt16 little-endian, channel 1 first, one sample after another. The ADC always records
-# all channels; those not selected in the experiment file are dropped on the PC.
 ADC_CHANNELS = (1, 2, 3, 4, 5, 6, 7, 8)
 ACQ_PAYLOAD_VERSION = 2
 FRAME_DTYPE = np.dtype(("<u2", len(ADC_CHANNELS)))
-# err-<code> replies of :ACQuire:DATA:GET?
 ACQ_ERRORS = {1: "invalid chunk index", 255: "general error"}
-# A chunk that arrives damaged (or not at all) is asked for again this many times.
 CHUNK_RETRIES = 3
 
 
@@ -41,7 +35,6 @@ def decode_frames(data: bytes) -> np.ndarray:
 
 def duration_for_samples(number_of_samples: int, sample_rate_hz: float) -> int:
     """:ACQuire:DURation value (whole ms) long enough to record number_of_samples."""
-    # round() first so that e.g. 20000 samples at 1 kHz gives 20000 ms, not 20001 (float error)
     return max(1, math.ceil(round(number_of_samples / sample_rate_hz * 1000, 6)))
 
 
@@ -53,10 +46,7 @@ class Acquisition:
 
     def __init__(self, connection: SCPIConnection, data_timeout_s: float | None = None) -> None:
         self._conn = connection
-        # Data chunks can be large; None means the connection's default timeout.
         self.data_timeout_s = data_timeout_s
-
-    # -------------------------------------------------------------- control
 
     def run(self) -> None:
         """:ACQuire:RUN - software trigger of the acquisition."""
@@ -79,8 +69,6 @@ class Acquisition:
         except ValueError:
             raise ValueError(f"Unexpected :ACQuire:AUTostart? reply: {reply!r}") from None
 
-    # ------------------------------------------------------------ parameters
-
     def set_sample_rate(self, rate_hz: float) -> None:
         """:ACQuire:SAMPle:RATE <kHz> - ADC sampling frequency."""
         if rate_hz <= 0:
@@ -89,7 +77,7 @@ class Acquisition:
 
     def get_sample_rate(self) -> float:
         """:ACQuire:SAMPle:RATE? - sample rate in Hz (the device reports kHz)."""
-        return self._query_float(":ACQ:SAMP:RATE?") * 1e3
+        return self._conn.query_float(":ACQ:SAMP:RATE?", ":ACQuire:SAMPle:RATE?") * 1e3
 
     def set_duration(self, duration_ms: int) -> None:
         """:ACQuire:DURation <ms> - total acquisition time."""
@@ -99,9 +87,7 @@ class Acquisition:
 
     def get_duration(self) -> int:
         """:ACQuire:DURation? - acquisition time in ms."""
-        return int(self._query_float(":ACQ:DUR?"))
-
-    # ------------------------------------------------------------------ data
+        return int(self._conn.query_float(":ACQ:DUR?", ":ACQuire:DURation?"))
 
     def fetch_chunk(self, index: int) -> np.ndarray:
         """:ACQuire:DATA:GET? <index> - the samples of chunk index, shape (N, 8).
@@ -134,12 +120,3 @@ class Acquisition:
                 problem = str(e)
                 log.warning("%s: %s - asked again", command, problem)
         raise IOError(f"{command}: {problem} after {CHUNK_RETRIES} repeats")
-
-    # -------------------------------------------------------------- helpers
-
-    def _query_float(self, command: str) -> float:
-        reply = self._conn.query(command).strip()
-        try:
-            return float(reply)
-        except ValueError:
-            raise ValueError(f"Unexpected {command} reply: {reply!r}") from None

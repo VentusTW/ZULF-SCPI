@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import ttk
@@ -15,22 +16,23 @@ from matplotlib.widgets import SpanSelector
 from zulf_nmr.experiment.schedule import QueueResult, ResultGroup, Transient
 from zulf_nmr.gui.tooltip import Tooltip
 from zulf_nmr.utils.visualization.results_plotter import (
-    draw_spectrum,
-    draw_time,
+    sample_range,
+    setup_spectrum_axes,
+    setup_time_axes,
     smooth_for_display,
-    visible_points,
+    spectrum,
+    spectrum_title,
 )
 
-ROW_SIZE_IN = (11.0, 3.6)  # starting size; rows are stretched to the width of the window
+ROW_SIZE_IN = (11.0, 3.6)
+LIVE_AVERAGE_INTERVAL_S = 1.0
 SELECTION_COLOUR = "#999999"
 CURSOR_COLOUR = "#C0392B"
-EDGE_GRAB_PX = 10  # how close to an edge of the selection (or a cursor) the mouse must be to grab it
-ZOOM_STEP = 1.25  # per wheel notch
-PAN_STEP = 0.2  # fraction of the shown range per wheel notch
-# Fixed margins around the plots in pixels: the plots keep their place and size while the
-# data, the tick labels and the titles change (an automatic layout would move them).
+EDGE_GRAB_PX = 10
+ZOOM_STEP = 1.25
+PAN_STEP = 0.2
 _MARGIN_PX = {"left": 64, "right": 14, "top": 40, "bottom": 40, "gap": 74}
-_TIME_SHARE = 0.6  # of the width of both plots
+_TIME_SHARE = 0.6
 
 
 class RowToolbar(NavigationToolbar2Tk):
@@ -47,7 +49,7 @@ class RowToolbar(NavigationToolbar2Tk):
         self.config(height=36)
         self.cursors_button = self._Button("Cursors", None, True, row.toggle_cursors)
         Tooltip(self.cursors_button, "Measuring cursors A and B: click or drag on a plot")
-        background = ttk.Style().lookup("TFrame", "background")  # the window's, not tk's white
+        background = ttk.Style().lookup("TFrame", "background")
         for widget in (self, *self.winfo_children()):
             try:
                 widget.config(background=background)
@@ -80,66 +82,92 @@ class TraceRow:
     """
 
     def __init__(self, master: tk.Misc, sample_rate_hz: float, channels: tuple[int, ...], average: bool,
-                 total_samples: int | None = None, on_scroll=None, start_s: float = 0.0) -> None:
+                 total_samples: int | None = None, on_scroll=None, start_s: float = 0.0,
+                 expanded: bool = True) -> None:
         self.rate = sample_rate_hz
         self.channels = channels
         self.average = average
-        self.start_s = start_s  # acquisition start, seconds after the sequence start
-        self.total_s = start_s + (total_samples or 0) / sample_rate_hz  # end of the time axis
+        self.start_s = start_s
+        self.total_s = start_s + (total_samples or 0) / sample_rate_hz
         self.data = np.empty((0, len(channels)))
         self.title = ""
         self.live = False
         self.t_range: tuple[float, float] | None = None
-        # Limits set by the user (toolbar, wheel) per plot: (xlim, ylim); a plot without
-        # them follows its data.
         self._user_limits: dict[str, tuple[tuple[float, float], tuple[float, float]]] = {}
-        self._auto_ylim: tuple[float, float] | None = None  # only grows, so a growing trace does not jump
-        self._drawing = False  # limits are being set by the program, not by the user
+        self._auto_ylim: tuple[float, float] | None = None
+        self._drawing = False
         self._spectrum = (np.zeros(1), np.zeros((1, len(channels))))
-        self._smooth = (np.zeros(0), np.zeros((0, len(channels))))  # smoothed trace, all of it
-        self._channel_lines: list = []  # the drawn curves, one per channel
-        self.on_scroll = on_scroll  # wheel without a modifier scrolls the list of rows
+        self.on_scroll = on_scroll
+        self._size: tuple[int, int] | None = None
 
-        # frame = header (toggle button + name, toolbar) above the plots; the frame is what is packed.
         self.frame = ttk.Frame(master)
-        header = ttk.Frame(self.frame)
-        header.pack(side="top", fill="x", pady=(4, 0))
-        self._toggle = ttk.Button(header, text="−", width=3, command=self.toggle)
+        self._header = ttk.Frame(self.frame)
+        self._header.pack(side="top", fill="x", pady=(4, 0))
+        self._toggle = ttk.Button(self._header, text="+", width=3, command=self.toggle)
         self._toggle.pack(side="left")
-        self._name = ttk.Label(header, text="", font=("Segoe UI", 9, "bold" if average else "normal"),
+        self._name = ttk.Label(self._header, text="", font=("Segoe UI", 9, "bold" if average else "normal"),
                                cursor="hand2")
         self._name.pack(side="left", padx=6)
         self._name.bind("<Button-1>", lambda _e: self.toggle())
-        self.expanded = True
+        self._readout = ttk.Label(self.frame, text="", font=("Consolas", 9), foreground=CURSOR_COLOUR)
+        for w in (self._header, self._toggle, self._name, self._readout):
+            w.bind("<MouseWheel>", lambda e: self.on_scroll and self.on_scroll(e.delta / 120))
 
+        self.cursors_on = False
+        self._cursor_x: dict[str, list[float | None]] = {"time": [None, None], "spec": [None, None]}
+        self._cursor_plot = "time"
+
+        self.figure: Figure | None = None
+        self.expanded = False
+        self.expand(expanded)
+
+    def _build_plots(self) -> None:
         self.figure = Figure(figsize=ROW_SIZE_IN)
         self.ax_time = self.figure.add_axes((0, 0, 1, 1))
         self.ax_spec = self.figure.add_axes((0, 0, 1, 1))
+        self._time_curves = setup_time_axes(self.ax_time, self.channels, self.average, self.start_s)
+        self._spec_curves = setup_spectrum_axes(self.ax_spec, self.channels, self.average)
+        self._watch_limits(self.ax_time, "time")
+        self._watch_limits(self.ax_spec, "spec")
         self.canvas = FigureCanvasTkAgg(self.figure, master=self.frame)
         self.widget = self.canvas.get_tk_widget()
-        self.toolbar = RowToolbar(self.canvas, header, self)
-        self.toolbar.pack(side="left", fill="x", expand=True, padx=(12, 0))
-        self._readout = ttk.Label(self.frame, text="", font=("Consolas", 9), foreground=CURSOR_COLOUR)
-        self.widget.pack(side="top", anchor="w")
-        for w in (header, self._toggle, self._name, self.toolbar, self._readout):
-            w.bind("<MouseWheel>", lambda e: self.on_scroll and self.on_scroll(e.delta / 120))
+        if self._size is not None:
+            self.widget.config(width=self._size[0], height=self._size[1])
+        self.toolbar = RowToolbar(self.canvas, self._header, self)
+        self.toolbar.bind("<MouseWheel>", lambda e: self.on_scroll and self.on_scroll(e.delta / 120))
         self._layout()
 
         self.selector: SpanSelector | None = None
+        self._new_selector()
         self.canvas.mpl_connect("resize_event", lambda _e: self._layout())
         self.canvas.mpl_connect("scroll_event", self._on_scroll)
         self.canvas.mpl_connect("button_press_event", self._on_press)
         self.canvas.mpl_connect("motion_notify_event", self._on_motion)
         self.canvas.mpl_connect("button_release_event", self._on_release)
         self._cursor = Cursors.POINTER
-        self._drag_cursor: Cursors | None = None  # cursor kept while the selection is dragged
-
-        # Measuring cursors A and B on each plot (s on the time plot, Hz on the spectrum).
-        self.cursors_on = False
-        self._cursor_x: dict[str, list[float | None]] = {"time": [None, None], "spec": [None, None]}
-        self._cursor_plot = "time"  # the plot whose cursors the readout describes
+        self._drag_cursor: Cursors | None = None
         self._dragged_cursor: tuple[str, int] | None = None
-        self._background = None  # picture without the cursors while one is dragged
+        self._background = None
+        if self.cursors_on:
+            self.canvas.widgetlock(self)
+            self.toolbar.cursors_button.select()
+            self._draw_cursors("time")
+
+    def _drop_plots(self) -> None:
+        """Free the figure of a closed row; the data, the zoom and the cursors stay."""
+        if self.figure is None:
+            return
+        self.selector.disconnect_events()
+        self.figure.clear()
+        self.toolbar.destroy()
+        self.widget.destroy()
+        self.figure = self.canvas = self.widget = self.toolbar = self.selector = None
+
+    def set_size(self, width: int, height: int) -> None:
+        """Size of the plots in pixels (the figure follows its widget)."""
+        self._size = (width, height)
+        if self.figure is not None:
+            self.widget.config(width=width, height=height)
 
     def _layout(self) -> None:
         """Place both plots with fixed margins (in pixels) for the current figure size."""
@@ -150,88 +178,81 @@ class TraceRow:
         bottom, plot_h = m["bottom"] / height, max(height - m["top"] - m["bottom"], 20) / height
         self.ax_time.set_position((m["left"] / width, bottom, time_w / width, plot_h))
         self.ax_spec.set_position(((m["left"] + time_w + m["gap"]) / width, bottom, spec_w / width, plot_h))
-        self._thin_lines()  # as many points as the plot is now wide
-
-    # ------------------------------------------------------------------ drawing
+        self._refresh_curves()
 
     def show(self, data: np.ndarray, title: str, live: bool = False) -> None:
         """Draw new data (a new trace, or an updated average); the selected range, the
         zoom and the cursors are kept. live: the trace is still growing."""
-        self.data, self.title, self.live = data, title, live
-        self._background = None  # new data: a cursor being dragged is drawn the slow way
-        self._name.config(text=title.replace("\n", "  —  "))
-        # Smoothed once per data; only the part in view, thinned to the plot's width, is drawn.
-        t, values = smooth_for_display(data.reshape(len(data), -1), self.rate)
-        self._smooth = (t + self.start_s, values)
-        points = visible_points(*self._smooth, self._time_xlim(), self.ax_time.bbox.width)
-        self._drawing = True
-        try:
-            draw_time(self.ax_time, data, self.rate, self.channels, title, self.average, None, self.start_s,
-                      points)
-            self._channel_lines = self.ax_time.lines[:len(self.channels)]
-            self._set_time_limits()
-            self._draw_cursors("time")
-        finally:
-            self._drawing = False
-        self._watch_limits(self.ax_time, "time")
-        self.ax_time.callbacks.connect("xlim_changed", lambda _ax: self._thin_lines())
-        self._draw_spectrum()
-        # ax.clear() removes the selector's artists, so a new one is made for every redraw.
-        self._new_selector()
+        self.data, self.title, self.live = data.reshape(-1, 1) if data.ndim == 1 else data, title, live
+        self._name.config(text=title.replace("\n", "  \u2014  "))
+        if self.figure is None:
+            return
+        self._background = None
+        self.ax_time.set_title(title, loc="left", fontsize=8, fontweight="bold" if self.average else None)
+        data = self.data
+
+        def smoothed() -> tuple[np.ndarray, np.ndarray]:
+            t, values = smooth_for_display(data, self.rate)
+            return t + self.start_s, values
+
+        self._time_curves.set_data(self.start_s + np.arange(len(data)) / self.rate, data, smoothed,
+                                   detail_always=not live)
+        self._set_time_limits()
+        self._update_spectrum()
         self._update_readout()
         self.canvas.draw_idle()
 
     def _time_xlim(self) -> tuple[float, float]:
-        """The user's time range, or from the sequence start (0) to the newest sample:
-        the axis widens as the samples of a transient arrive."""
-        if "time" in self._user_limits:
-            return self._user_limits["time"][0]
+        """From the sequence start (0) to the newest sample: the axis widens as the samples
+        of a transient arrive."""
         end = self.start_s + len(self.data) / self.rate
         if end <= self.start_s:
             end = max(self.total_s, self.start_s + 1 / self.rate)
         return 0.0, end
 
-    def _thin_lines(self) -> None:
-        """Give the channel lines the points of the time range now in view (after a zoom,
-        a pan or a resize): drawing then costs the same at any zoom."""
-        if not self._channel_lines:
-            return
-        t, values = visible_points(*self._smooth, self.ax_time.get_xlim(), self.ax_time.bbox.width)
-        for column, line in enumerate(self._channel_lines):
-            line.set_data(t, values[:, column])
-
-    def _set_time_limits(self) -> None:
-        if "time" in self._user_limits:
-            xlim, ylim = self._user_limits["time"]
-            self.ax_time.set_xlim(*xlim)
-            self.ax_time.set_ylim(*ylim)
-            return
-        self.ax_time.set_xlim(*self._time_xlim())
-        low, high = self.ax_time.get_ylim()  # autoscaled to the data
-        if self._auto_ylim is not None:
-            low, high = min(low, self._auto_ylim[0]), max(high, self._auto_ylim[1])
-        self._auto_ylim = (low, high)
-        self.ax_time.set_ylim(low, high)
-
-    def _draw_spectrum(self) -> None:
+    def _set_limits(self, ax, plot: str, xlim, ylim) -> None:
+        """Limits set by the program: the user's own if there are any, else xlim and ylim."""
         self._drawing = True
         try:
-            self._spectrum = draw_spectrum(self.ax_spec, self.data, self.rate, self.channels, self.t_range,
-                                           self.average, self.start_s)
-            if "spec" in self._user_limits:
-                xlim, ylim = self._user_limits["spec"]
-                self.ax_spec.set_xlim(*xlim)
-                self.ax_spec.set_ylim(*ylim)
-            self._draw_cursors("spec")
+            if plot in self._user_limits:
+                xlim, ylim = self._user_limits[plot]
+            ax.set_xlim(*xlim)
+            if ylim is not None:
+                ax.set_ylim(*ylim)
         finally:
             self._drawing = False
-        self._watch_limits(self.ax_spec, "spec")
+        self._refresh_curves()
+
+    def _set_time_limits(self) -> None:
+        ylim = self._time_curves.y_limits()
+        if ylim is not None and self._auto_ylim is not None:
+            ylim = min(ylim[0], self._auto_ylim[0]), max(ylim[1], self._auto_ylim[1])
+        if ylim is not None:
+            self._auto_ylim = ylim
+        self._set_limits(self.ax_time, "time", self._time_xlim(), ylim)
+
+    def _update_spectrum(self) -> None:
+        """Spectrum of the selected range (of all samples without a selection)."""
+        i0, i1 = sample_range(len(self.data), self.rate, self.t_range, self.start_s)
+        self._spectrum = spectrum(self.data[i0:i1], self.rate)
+        self._spec_curves.set_data(*self._spectrum)
+        self.ax_spec.set_title(spectrum_title(i0, i1, self.rate, self.start_s), loc="left", fontsize=9)
+        ylim = self._spec_curves.y_limits()
+        self._set_limits(self.ax_spec, "spec", (0, self.rate / 2), ylim and (min(0.0, ylim[0]), ylim[1]))
+        self._draw_cursors("spec")
+
+    def _refresh_curves(self) -> None:
+        """Give the curves the points of the ranges now in view (after new data, a zoom,
+        a pan or a resize): drawing then costs the same at any zoom."""
+        self._time_curves.refresh(self.ax_time.get_xlim(), self.ax_time.bbox.width)
+        self._spec_curves.refresh(self.ax_spec.get_xlim(), self.ax_spec.bbox.width)
 
     def _watch_limits(self, ax, plot: str) -> None:
-        """Remember limits the user sets (toolbar, wheel); ax.clear() drops the callbacks."""
+        """Remember limits the user sets (toolbar, wheel) and thin the curves for them."""
         def changed(_ax) -> None:
             if not self._drawing:
                 self._user_limits[plot] = (ax.get_xlim(), ax.get_ylim())
+                self._refresh_curves()
         ax.callbacks.connect("xlim_changed", changed)
         ax.callbacks.connect("ylim_changed", changed)
 
@@ -260,27 +281,33 @@ class TraceRow:
             return
         self.expanded = expanded
         if expanded:
+            built = self.figure is None
+            if built:
+                self._build_plots()
             self.toolbar.pack(side="left", fill="x", expand=True, padx=(12, 0))
             self.widget.pack(side="top", anchor="w")
             if self.cursors_on:
                 self._readout.pack(side="top", anchor="w", padx=6, before=self.widget)
+            if built and self.title:
+                self.show(self.data, self.title, self.live)
         else:
-            self.toolbar.pack_forget()
-            self.widget.pack_forget()
             self._readout.pack_forget()
+            if self.average:
+                self.toolbar.pack_forget()
+                self.widget.pack_forget()
+            else:
+                self._drop_plots()
         self._toggle.config(text="−" if expanded else "+")
 
     def toggle(self) -> None:
         self.expand(not self.expanded)
 
-    # ----------------------------------------------------------- spectrum range
-
     def _on_select(self, t0: float, t1: float) -> None:
-        if t1 - t0 <= 0:  # a click without dragging
+        if t1 - t0 <= 0:
             self.clear_selection()
             return
         self.t_range = (max(t0, self.start_s), t1)
-        self._draw_spectrum()
+        self._update_spectrum()
         self._update_readout()
         self.canvas.draw_idle()
 
@@ -289,7 +316,7 @@ class TraceRow:
         self.t_range = None
         if self.selector is not None:
             self.selector.clear()
-        self._draw_spectrum()
+        self._update_spectrum()
         self._update_readout()
         self.canvas.draw_idle()
 
@@ -305,14 +332,10 @@ class TraceRow:
         elif event.button == 3 and event.inaxes is self.ax_time:
             self.clear_selection()
         elif event.button == 1 and event.dblclick and self._hover_cursor(event) == Cursors.RESIZE_HORIZONTAL:
-            # Double click on an edge: type its position. After matplotlib has finished
-            # with the click, so the SpanSelector does not take the dialog's events.
             left, right = (self.ax_time.transData.transform((x, 0))[0] for x in self.selector.extents)
             edge = 0 if abs(event.x - left) <= abs(event.x - right) else 1
             self.widget.after_idle(self._edit_edge, edge)
         elif event.button == 1:
-            # Keep the hover cursor while dragging; the SpanSelector sets its own on press,
-            # so it is set again once matplotlib has handled the event.
             self._drag_cursor = self._hover_cursor(event)
             self.widget.after_idle(self._set_cursor, self._drag_cursor, True)
 
@@ -321,7 +344,6 @@ class TraceRow:
             return
         self._end_cursor_drag()
         self._drag_cursor = None
-        # The SpanSelector resets the cursor on release; show the one for where the mouse is.
         self.widget.after_idle(self._set_cursor, self._hover_cursor(event), True)
 
     def _on_motion(self, event) -> None:
@@ -383,8 +405,6 @@ class TraceRow:
             self._cursor = cursor
             self.canvas.set_cursor(cursor)
 
-    # -------------------------------------------------------- measuring cursors
-
     def toggle_cursors(self) -> None:
         self.set_cursors(not self.cursors_on)
 
@@ -394,9 +414,9 @@ class TraceRow:
         button = self.toolbar.cursors_button
         if on != self.cursors_on:
             if on:
-                if self.toolbar.mode:  # Pan or Zoom off first: one tool at a time
+                if self.toolbar.mode:
                     (self.toolbar.pan if self.toolbar.mode.name == "PAN" else self.toolbar.zoom)()
-                self.canvas.widgetlock(self)  # the SpanSelector waits meanwhile
+                self.canvas.widgetlock(self)
                 if self.expanded:
                     self._readout.pack(side="top", anchor="w", padx=6, before=self.widget)
             else:
@@ -439,8 +459,6 @@ class TraceRow:
         self._dragged_cursor = (plot, index)
         self._cursor_x[plot][index] = event.xdata
         self._cursor_plot = plot
-        # While dragging, only the cursors are redrawn over a saved picture of the rest
-        # (blitting): a full redraw of a long trace is too slow to follow the mouse.
         self._draw_cursors(plot, animated=True)
         self.canvas.draw()
         self._background = self.canvas.copy_from_bbox(self.figure.bbox)
@@ -449,7 +467,7 @@ class TraceRow:
 
     def _end_cursor_drag(self) -> None:
         if self._dragged_cursor is not None:
-            self._draw_cursors(self._dragged_cursor[0])  # part of the picture again
+            self._draw_cursors(self._dragged_cursor[0])
             self.canvas.draw_idle()
         self._dragged_cursor = None
         self._background = None
@@ -494,7 +512,7 @@ class TraceRow:
             if len(self.data) == 0:
                 return [float("nan")] * len(self.channels)
             xs = self.start_s + np.arange(len(self.data)) / self.rate
-            columns = self.data.reshape(len(self.data), -1)
+            columns = self.data
         else:
             xs, columns = self._spectrum
         return [float(np.interp(x, xs, columns[:, c], left=np.nan, right=np.nan))
@@ -524,8 +542,6 @@ class TraceRow:
         title = "Time" if plot == "time" else "Spectrum"
         self._readout.config(text=f"{title} cursors — " + "    ".join(parts))
 
-    # -------------------------------------------------------------------- wheel
-
     def _on_scroll(self, event) -> None:
         state = getattr(event.guiEvent, "state", 0)
         ctrl, shift = bool(state & 0x4), bool(state & 0x1)
@@ -537,24 +553,22 @@ class TraceRow:
         start, end = ax.get_xlim()
         width = end - start
         if ax is self.ax_time:
-            # 0 (sequence start) .. the end of the recording; at least 5 samples shown.
             limit, narrowest = max(self.total_s, self.start_s + len(self.data) / self.rate), 5 / self.rate
         else:
-            # 0 .. the Nyquist frequency; at least 5 frequency steps shown.
             freqs = self._spectrum[0]
             limit = self.rate / 2
             narrowest = 5 * (freqs[1] - freqs[0]) if len(freqs) > 1 else limit / 1000
-        if ctrl:  # zoom around the mouse
+        if ctrl:
             new_width = width / ZOOM_STEP if event.step > 0 else width * ZOOM_STEP
             new_width = min(max(new_width, narrowest), limit)
             x = event.xdata if event.xdata is not None else start + width / 2
             start = x - (x - start) * new_width / width
             width = new_width
-        else:  # move along the axis
+        else:
             start -= event.step * PAN_STEP * width
         width = min(width, limit)
         start = max(0.0, min(start, limit - width))
-        ax.set_xlim(start, start + width)  # remembered as the user's view
+        ax.set_xlim(start, start + width)
         self.canvas.draw_idle()
 
 
@@ -564,7 +578,7 @@ class EdgeDialog(tk.Toplevel):
     def __init__(self, master: tk.Misc, name: str, extents: tuple[float, float], edge: int,
                  limits: tuple[float, float], on_apply, on_close=None) -> None:
         super().__init__(master)
-        self._on_close = on_close  # called once the dialog is gone (OK, Cancel, Esc or closed)
+        self._on_close = on_close
         self.bind("<Destroy>", lambda e: e.widget is self and self._on_close and self._on_close())
         self.title(f"{name} of the range")
         self.resizable(False, False)
@@ -623,10 +637,8 @@ class ResultsViewer(tk.Toplevel):
         self.title(f"Results — {folder.name}")
         dpi = self.winfo_fpixels("1i")
         self._row_px = [int(ROW_SIZE_IN[0] * dpi), int(ROW_SIZE_IN[1] * dpi)]
-        # Nearly the whole screen; the rows take the full width of the window.
         self.geometry(f"{self.winfo_screenwidth() - 80}x{self.winfo_screenheight() - 120}+40+20")
 
-        # Bottom edge: progress of the whole queue, the same as in the main window.
         progress = ttk.Frame(self, padding=(8, 0, 8, 8))
         progress.pack(side="bottom", fill="x")
         self._progress_text = ttk.Label(progress, text="", width=48)
@@ -636,7 +648,7 @@ class ResultsViewer(tk.Toplevel):
 
         bottom = ttk.Frame(self, padding=8)
         bottom.pack(side="bottom", fill="x")
-        ttk.Label(bottom, text=str(folder)).pack(side="left")  # what happens is shown by the progress bar
+        ttk.Label(bottom, text=str(folder)).pack(side="left")
         ttk.Button(bottom, text="Close", command=self.destroy).pack(side="right")
 
         holder = ttk.Frame(self)
@@ -652,12 +664,10 @@ class ResultsViewer(tk.Toplevel):
         self._view.bind("<Configure>", self._on_resize)
         self._view.bind("<MouseWheel>", self._on_wheel)
 
-        self._averages: dict[int, TraceRow] = {}  # by set index
-        self._rows: dict[tuple[int, int], TraceRow] = {}  # by (set index, transient number)
-        # Mean of the complete transients of every set and how many there are.
+        self._averages: dict[int, TraceRow] = {}
+        self._rows: dict[tuple[int, int], TraceRow] = {}
         self._complete: dict[int, tuple[np.ndarray, int]] = {}
-
-    # ------------------------------------------------------------ live update
+        self._average_drawn: dict[int, float] = {}
 
     def show_live(self, group: ResultGroup, number: int, data: np.ndarray, total_samples: int) -> None:
         """Draw a transient that is still being acquired (data = samples received so far)
@@ -669,10 +679,14 @@ class ResultsViewer(tk.Toplevel):
                        f"\nacquiring... {len(data)}/{total_samples} samples ({percent}%)", live=True)
 
         complete, count = self._complete.get(group.set_index, (None, 0))
+        now = time.monotonic()
+        if now - self._average_drawn.get(group.set_index, -LIVE_AVERAGE_INTERVAL_S) < LIVE_AVERAGE_INTERVAL_S:
+            self._follow(follow)
+            return
+        self._average_drawn[group.set_index] = now
         if complete is None:
-            live_average = data  # nothing to average with yet
+            live_average = data
         else:
-            # Received samples: mean including the running transient; the rest: the complete ones.
             k = min(len(data), len(complete))
             live_average = complete.copy()
             live_average[:k] = (complete[:k] * count + data[:k]) / (count + 1)
@@ -701,7 +715,6 @@ class ResultsViewer(tk.Toplevel):
         n_transients = 0
         for group in result.groups:
             for transient in group.transients:
-                # Only the averages are open at first; a transient opens with its + button.
                 row = self._row(group, transient.number, len(transient.data), expanded=False)
                 row.show(transient.data, f"Set {group.set_index}: transient {transient.number:03d} of "
                                          f"{group.expected_transients}\n{transient.file.name}")
@@ -720,8 +733,6 @@ class ResultsViewer(tk.Toplevel):
         self._progress.config(maximum=maximum, value=value)
         self._progress_text.config(text=text)
 
-    # ---------------------------------------------------------------- helpers
-
     def _row(self, group: ResultGroup, number: int, total_samples: int, expanded: bool = True) -> TraceRow:
         """The row of a transient, created (above the set's average, if there is one) when needed.
 
@@ -736,8 +747,8 @@ class ResultsViewer(tk.Toplevel):
                     other.expand(False)
             row = self._rows[key] = TraceRow(self._inner, group.sample_rate_hz, group.channels,
                                              average=False, total_samples=total_samples,
-                                             on_scroll=self._scroll, start_s=group.acquisition_start_s)
-            row.expand(expanded)
+                                             on_scroll=self._scroll, start_s=group.acquisition_start_s,
+                                             expanded=expanded)
             average = self._averages.get(group.set_index)
             self._pack(row, before=average.frame if average else None)
         return row
@@ -768,11 +779,10 @@ class ResultsViewer(tk.Toplevel):
         self._row_px[0] = event.width
         self._view.itemconfigure(self._inner_id, width=event.width)
         for row in (*self._rows.values(), *self._averages.values()):
-            row.widget.config(width=event.width)
+            row.set_size(*self._row_px)
 
     def _pack(self, row: TraceRow, before: tk.Widget | None = None) -> None:
-        # Wheel events over the plots arrive through matplotlib (TraceRow._on_scroll).
-        row.widget.config(width=self._row_px[0], height=self._row_px[1])
+        row.set_size(*self._row_px)
         if before is None:
             row.frame.pack(side="top", fill="x", anchor="w")
         else:

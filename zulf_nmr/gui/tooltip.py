@@ -33,7 +33,7 @@ class Tooltip:
             return
         x, y = self.widget.winfo_pointerxy()
         self._window = window = tk.Toplevel(self.widget)
-        window.wm_overrideredirect(True)  # no title bar
+        window.wm_overrideredirect(True)
         window.attributes("-topmost", True)
         tk.Label(window, text=self.text, justify="left", background="#ffffe8", foreground="#222222",
                  relief="solid", borderwidth=1, padx=6, pady=3, font=("Segoe UI", 9)).pack()

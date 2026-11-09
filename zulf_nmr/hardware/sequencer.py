@@ -9,7 +9,6 @@ from zulf_nmr.core.scpi import header_matches, quote, unquote
 if TYPE_CHECKING:
     from zulf_nmr.core.connection import SCPIConnection
 
-# Commands that :SEQuence:ADD accepts as <event>.
 ALLOWED_EVENTS = (
     ":MOTor:MOVE",
     ":SHIM:CURRent",

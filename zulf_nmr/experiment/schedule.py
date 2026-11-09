@@ -23,15 +23,13 @@ from zulf_nmr.experiment.parser import (
     HardwareLimits,
     load_experiment_config,
 )
-from zulf_nmr.experiment.runner import ExperimentAborted, ExperimentRunner, average, save_csv
+from zulf_nmr.experiment.runner import ExperimentAborted, ExperimentRunner, running_average, save_csv
 from zulf_nmr.experiment.sequence import acquisition_window_ms
 from zulf_nmr.experiment.simulation import SIM_CHUNKS, SIM_TRANSIENT_S, choose_waves, simulate_transient
 from zulf_nmr.hardware.awg import AwgWaveform, load_awg_npz
 
 log = logging.getLogger(__name__)
 
-# Delay units -> seconds. The delay is timed by the PC, so sub-millisecond
-# values are only as precise as the operating system's sleep.
 TIME_UNITS: dict[str, float] = {"h": 3600.0, "min": 60.0, "s": 1.0, "ms": 1e-3, "us": 1e-6}
 
 
@@ -146,8 +144,8 @@ def queue_errors(items: list[QueueItem]) -> list[str]:
 
 @dataclass
 class Transient:
-    number: int  # nnn in the file name: 1 .. output.average_count
-    set_index: int  # position of its set in the queue, 1-based
+    number: int
+    set_index: int
     file: Path
     data: np.ndarray
 
@@ -156,14 +154,14 @@ class Transient:
 class ResultGroup:
     """One set of the queue: its copied configuration, its transients and their average."""
 
-    name: str  # experiment_name, plus _<occurrence> if it is in the queue more than once
-    set_index: int  # position in the queue, 1-based
+    name: str
+    set_index: int
     config_source: Path
     sample_rate_hz: float
-    channels: tuple[int, ...]  # acquisition.channels - the data columns, in this order
+    channels: tuple[int, ...]
     file_format: str
-    expected_transients: int  # output.average_count
-    acquisition_start_s: float  # start of the recording, seconds after the sequence start (:SEQ:RUN)
+    expected_transients: int
+    acquisition_start_s: float
     config_file: Path
     awg_file: Path | None = None
     transients: list[Transient] = field(default_factory=list)
@@ -176,7 +174,7 @@ class QueueResult:
     """Where the results of one queue run were saved."""
 
     folder: Path
-    groups: list[ResultGroup] = field(default_factory=list)  # one per set, in queue order
+    groups: list[ResultGroup] = field(default_factory=list)
 
     @property
     def files(self) -> list[Path]:
@@ -187,6 +185,54 @@ class QueueResult:
             files += [t.file for t in group.transients]
             files += [group.average_file] if group.average_file else []
         return files
+
+
+class _BackgroundWriter:
+    """Writes result files in its own thread, in order, so the next transient need not wait
+    for the files of the previous one. A file asked for again before it was written (the
+    average after every transient) is written once, with the newest data."""
+
+    def __init__(self) -> None:
+        self._jobs: dict[Path, tuple] = {}
+        self._cond = threading.Condition()
+        self._closed = False
+        self._error: BaseException | None = None
+        self._thread = threading.Thread(target=self._run, name="Result files", daemon=True)
+        self._thread.start()
+
+    def save(self, path: Path, data: np.ndarray, sample_rate_hz: float, channels: tuple[int, ...]) -> None:
+        with self._cond:
+            if self._error is not None:
+                raise self._error
+            self._jobs.pop(path, None)
+            self._jobs[path] = (data, sample_rate_hz, channels)
+            self._cond.notify()
+
+    def _run(self) -> None:
+        while True:
+            with self._cond:
+                while not self._jobs and not self._closed:
+                    self._cond.wait()
+                if not self._jobs:
+                    return
+                path = next(iter(self._jobs))
+                job = self._jobs.pop(path)
+            try:
+                save_csv(path, *job)
+            except Exception as e:
+                log.error("Cannot save %s: %s", path, english_error(e))
+                with self._cond:
+                    if self._error is None:
+                        self._error = e
+
+    def close(self, raise_error: bool = True) -> None:
+        """Wait until every file is written; then raise the first error, if any."""
+        with self._cond:
+            self._closed = True
+            self._cond.notify()
+        self._thread.join()
+        if self._error is not None and raise_error:
+            raise self._error
 
 
 class QueueRunner:
@@ -237,9 +283,10 @@ class QueueRunner:
         self.on_progress = on_progress
         self.on_result = on_result
         self.on_live = on_live
-        self.result: QueueResult | None = None  # set as soon as the folder exists
+        self.result: QueueResult | None = None
         self._abort = threading.Event()
         self._current: ExperimentRunner | None = None
+        self._writer: _BackgroundWriter | None = None
 
     def abort(self) -> None:
         """Stop the running set (sends *RST) or the wait between sets."""
@@ -257,7 +304,17 @@ class QueueRunner:
         totals = Counter(item.config.experiment_name for item in self.items)
         occurrences: Counter[str] = Counter()
 
-        n = len(self.items)
+        self._writer = _BackgroundWriter()
+        try:
+            self._run_sets(folder, stamp, totals, occurrences)
+        except BaseException:
+            self._writer.close(raise_error=False)
+            raise
+        self._writer.close()
+        return result
+
+    def _run_sets(self, folder: Path, stamp: str, totals: Counter, occurrences: Counter) -> None:
+        result, n = self.result, len(self.items)
         for index, item in enumerate(self.items, start=1):
             if self._abort.is_set():
                 raise ExperimentAborted("Queue aborted by user")
@@ -276,7 +333,6 @@ class QueueRunner:
                 self._status(f"Waiting {format_delay(item.delay_s)} before set {index + 1}/{n}")
                 if self._abort.wait(item.delay_s):
                     raise ExperimentAborted("Queue aborted by user")
-        return result
 
     @staticmethod
     def _new_group(item: QueueItem, index: int, name: str, folder: Path, stamp: str) -> ResultGroup:
@@ -304,15 +360,13 @@ class QueueRunner:
 
     def _save_transient(self, group: ResultGroup, number: int, data: np.ndarray, stamp: str) -> None:
         folder = group.config_file.parent
-        name = f"{stamp}_{group.name}_transient_{number:03d}.{group.file_format}"
-        path = save_csv(folder / name, data, group.sample_rate_hz, group.channels)
+        path = folder / f"{stamp}_{group.name}_transient_{number:03d}.{group.file_format}"
+        self._writer.save(path, data, group.sample_rate_hz, group.channels)
         transient = Transient(number, group.set_index, path, data)
         group.transients.append(transient)
-        group.average = average([t.data for t in group.transients])
-        group.average_file = save_csv(
-            folder / f"{stamp}_{group.name}_average.{group.file_format}", group.average, group.sample_rate_hz,
-            group.channels,
-        )
+        group.average = running_average(group.average, data, len(group.transients))
+        group.average_file = folder / f"{stamp}_{group.name}_average.{group.file_format}"
+        self._writer.save(group.average_file, group.average, group.sample_rate_hz, group.channels)
         if self.on_result:
             self.on_result(group, transient)
 
@@ -330,7 +384,7 @@ class QueueRunner:
                 self.on_live(group, number, data)
 
         if self.simulate:
-            waves = choose_waves(item.config)  # sin or cos per channel, the same for the whole set
+            waves = choose_waves(item.config)
             for number in range(1, item.config.output.average_count + 1):
                 on_transient(number, self._simulate(item, number, waves, progress, live))
             return
@@ -338,10 +392,11 @@ class QueueRunner:
             self.spec,
             item.config,
             awg_waveform=item.awg,
-            auto_save=False,  # saved here, with the queue's names
+            auto_save=False,
             on_progress=progress,
             on_transient=on_transient,
             on_data=live,
+            abort_event=self._abort,
         )
         try:
             self._current.run()

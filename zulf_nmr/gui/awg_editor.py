@@ -27,11 +27,10 @@ from zulf_nmr.gui.tooltip import Tooltip
 from zulf_nmr.utils.visualization.awg_plotter import plot_awg
 
 _COLOR_ERROR = "#d0342c"
+PREVIEW_DELAY_MS = 150
 _RANGES = {"HIGH (1 A)": AwgRange.HIGH, "LOW (10 mA)": AwgRange.LOW}
-_SETTINGS = "awg_editor"  # section of the saved settings
+_SETTINGS = "awg_editor"
 
-# Calculator keypad: groups of keys, side by side; every key inserts its text
-# ("<" = backspace, "C" = clear the formula), "" leaves a gap.
 _KEYPAD = [
     ("Numbers", [["7", "8", "9", "/"],
                  ["4", "5", "6", "*"],
@@ -54,7 +53,6 @@ _KEYPAD = [
 _KEY_LABELS = {"<": "⌫"}
 _FUNCTIONS = {"sin", "cos", "tan", "exp", "log", "sqrt", "root", "abs", "min", "max",
               "step", "pulse", "ramp", "gauss", "hann", "chirp", "data"}
-# Shown after the mouse rests on a keypad key (digits have none).
 _KEY_NAMES = {
     "/": "divide", "*": "multiply", "-": "subtract (or minus)", "+": "add", "^": "power: 2^3 = 8",
     ".": "decimal point", ",": "separates the arguments of a function", "(": "opening bracket",
@@ -80,7 +78,6 @@ _KEY_NAMES = {
     "<": "delete the character before the cursor", "C": "clear the whole formula",
 }
 
-# Greyed in an empty formula field.
 _EXAMPLES = ("200*pulse(5ms, 15ms)", "5*sin(2*pi*300Hz*t)*exp(-t/15ms)",
              "500*ramp(40ms, 45ms) - 500*ramp(65ms, 70ms)", "300*chirp(100Hz, 800Hz, 10ms, 60ms)")
 
@@ -103,10 +100,11 @@ class AwgEditor(tk.Toplevel):
         self._on_saved = on_saved
         self._pending: str | None = None
         self._waveform: AwgWaveform | None = None
+        self._pending_preview: str | None = None
+        self._drawn: AwgWaveform | None = None
         self._errors: list[str] = []
-        self._source: SourceData | None = None  # samples of the opened file, for data(n)
+        self._source: SourceData | None = None
 
-        # What was typed last time, or the defaults.
         saved = user_settings.load_section(_SETTINGS)
         formulas = saved.get("formulas")
         if not (isinstance(formulas, list) and len(formulas) == N_CHANNELS
@@ -136,8 +134,6 @@ class AwgEditor(tk.Toplevel):
             "formulas": [f.get() for f in self._formulas],
         })
         super().destroy()
-
-    # -------------------------------------------------------------------- UI
 
     def _build_ui(self) -> None:
         bottom = ttk.Frame(self, padding=8)
@@ -179,7 +175,6 @@ class AwgEditor(tk.Toplevel):
             entry.bind("<FocusIn>", lambda _e, w=entry: setattr(self, "_active", w))
             self._entries.append(entry)
             ghost = GhostText(entry, f"e.g. {_EXAMPLES[i]}")
-            # Typed by a keypad button or set by Open... (no key event): update the hint too.
             self._formulas[i].trace_add("write", lambda *_, g=ghost: self.after_idle(g.update))
             status = ttk.Label(grid, text="", foreground="#666666")
             status.grid(row=2 * i + 1, column=2, sticky="w", padx=6, pady=(0, 4))
@@ -216,11 +211,7 @@ class AwgEditor(tk.Toplevel):
         else:
             entry.insert("insert", f"{key}(" if key in _FUNCTIONS else key)
 
-    # ---------------------------------------------------------------- update
-
     def _schedule_update(self) -> None:
-        # At once, as soon as Tk is idle: several changes in one event (e.g. Open... setting
-        # every field) still give one update.
         if self._pending is None:
             self._pending = self.after_idle(self._update)
 
@@ -233,7 +224,7 @@ class AwgEditor(tk.Toplevel):
         try:
             rate, duration = float(self._rate.get().replace(",", ".")), float(self._duration.get().replace(",", "."))
         except ValueError:
-            self._show([f"sample rate and duration must be numbers"], [None] * N_CHANNELS, None)
+            self._show(["sample rate and duration must be numbers"], [None] * N_CHANNELS, None)
             return
         waveform, errors, channel_errors = build_waveform(
             self._channels(), rate, duration, self._max_rate, self._max_amp, self._source)
@@ -253,22 +244,28 @@ class AwgEditor(tk.Toplevel):
             else:
                 label.config(text="")
         if not self._errors:
-            # Every channel is OK: draw it now.
             self._summary.config(
                 text=f"{waveform.n_samples} samples, {waveform.sample_rate_hz:g} Hz, {waveform.duration_s * 1000:g} ms",
                 foreground="")
-            self._figure.clear()
-            plot_awg(waveform, fig=self._figure)
-            self._canvas.draw_idle()
+            if self._pending_preview is not None:
+                self.after_cancel(self._pending_preview)
+            self._pending_preview = self.after(PREVIEW_DELAY_MS, self._draw_preview)
         else:
-            # E.g. a formula half typed: keep the last valid preview instead of a broken one.
             self._summary.config(text="fix the errors - the preview shows the last valid version",
                                  foreground=_COLOR_ERROR)
 
-    # ------------------------------------------------------------ open, save
+    def _draw_preview(self) -> None:
+        self._pending_preview = None
+        waveform = self._waveform
+        if waveform is None or _same_waveform(waveform, self._drawn):
+            return
+        self._drawn = waveform
+        self._figure.clear()
+        plot_awg(waveform, fig=self._figure)
+        self._canvas.draw_idle()
 
     def _save(self) -> None:
-        if self._pending is not None:  # the user typed and pressed Save at once
+        if self._pending is not None:
             self.after_cancel(self._pending)
             self._update()
         if self._waveform is None:
@@ -301,6 +298,15 @@ class AwgEditor(tk.Toplevel):
             messagebox.showinfo("Fit formulas", "Open an AWG file first - its channels (data(n)) are "
                                                 "what the formulas are fitted to.", parent=self)
             return
+        self.config(cursor="watch")
+        self.update_idletasks()
+        try:
+            lines = self._fit_channels()
+        finally:
+            self.config(cursor="")
+        messagebox.showinfo("Fit formulas", "\n".join(lines), parent=self)
+
+    def _fit_channels(self) -> list[str]:
         lines = []
         for i, var in enumerate(self._formulas):
             text = var.get().strip().replace(" ", "")
@@ -319,7 +325,7 @@ class AwgEditor(tk.Toplevel):
             else:
                 var.set(result.formula)
                 lines.append(f"CH{n}: {result.note}, max error {result.max_error_mA:.2g} mA")
-        messagebox.showinfo("Fit formulas", "\n".join(lines), parent=self)
+        return lines
 
     def _open(self) -> None:
         path = filedialog.askopenfilename(parent=self, title="Open AWG sequence", initialdir=self._initial_dir,
@@ -339,3 +345,8 @@ class AwgEditor(tk.Toplevel):
             self._formulas[i].set(ch.formula)
             self._ranges[i].set(next(k for k, v in _RANGES.items() if v == ch.range_))
         self._initial_dir = Path(path).parent
+
+
+def _same_waveform(a: AwgWaveform, b: AwgWaveform | None) -> bool:
+    return (b is not None and a.sample_rate_hz == b.sample_rate_hz and a.ranges == b.ranges
+            and a.source_path == b.source_path and np.array_equal(a.currents_A, b.currents_A))

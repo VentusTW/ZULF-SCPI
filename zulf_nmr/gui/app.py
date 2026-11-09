@@ -7,6 +7,7 @@ import logging
 import queue
 import sys
 import threading
+import time
 import tkinter as tk
 from dataclasses import asdict
 from datetime import datetime
@@ -33,7 +34,14 @@ from zulf_nmr.experiment.parser import (
 from zulf_nmr.experiment.history import HistoryError, load_results
 from zulf_nmr.experiment.runner import ExperimentAborted
 from zulf_nmr.experiment.sequence import acquisition_window_ms
-from zulf_nmr.experiment.schedule import QueueItem, QueueRunner, ResultGroup, Transient, format_delay
+from zulf_nmr.experiment.schedule import (
+    QueueItem,
+    QueueResult,
+    QueueRunner,
+    ResultGroup,
+    Transient,
+    format_delay,
+)
 from zulf_nmr.gui import user_settings
 from zulf_nmr.gui.awg_editor import AwgEditor
 from zulf_nmr.gui.preview import PlotPreview
@@ -41,27 +49,28 @@ from zulf_nmr.gui.queue_editor import QueueEditor
 from zulf_nmr.gui.results_viewer import ResultsViewer
 from zulf_nmr.utils.visualization.awg_plotter import plot_awg
 from zulf_nmr.utils.visualization.events_plotter import AcquisitionWindow, plot_events
+from zulf_nmr.version import version_text
 
 log = logging.getLogger(__name__)
 
-# Used when system.json is missing or invalid.
 DEFAULT_SYSTEM = SystemConfig(
     connection=ConnectionSettings(port="COM3", baudrate=115200, timeout_s=2.0),
     hardware_limits=HardwareLimits(),
     data_output=Path("data/results/"),
 )
 
-# The DM Technologies logo (from dmtechnologies.eu) as the window and taskbar icon; inside
-# the PyInstaller executable the folder is unpacked next to the code.
 ICON_DIR = Path(__file__).resolve().parent / "assets"
 
 _STATUS_POLL_MS = 500
 _LOG_POLL_MS = 100
-_MAX_LOG_LINE = 300  # longer console lines (e.g. echoed binary data) are cut
+_DRAIN_BUDGET_S = 0.05
+_MAX_CONSOLE_LINES = 5000
+_CLOSE_WAIT_S = 5.0
+_MAX_LOG_LINE = 300
 _COLOR_OK = "#2e9e44"
 _COLOR_FAIL = "#d0342c"
-_SETTINGS = "main_window"  # section of the saved settings
-_MAX_SAVED_HISTORY = 100  # console commands remembered for the next start
+_SETTINGS = "main_window"
+_MAX_SAVED_HISTORY = 100
 
 
 def load_system_settings(path: Path = DEFAULT_SYSTEM_CONFIG) -> tuple[SystemConfig, str]:
@@ -79,23 +88,22 @@ def load_system_settings(path: Path = DEFAULT_SYSTEM_CONFIG) -> tuple[SystemConf
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        self.title("ZULF-SCPI")
+        self.title(f"ZULF-SCPI {version_text()}")
         self._set_icon()
         self.geometry("820x560")
         self.minsize(640, 400)
 
-        # (tag, payload) from worker threads; payload is text, or a tuple for "progress" and "result"
         self._incoming: queue.Queue[tuple[str, Any]] = queue.Queue()
         self._outgoing: queue.Queue[tuple[SCPIConnection, str]] = queue.Queue()
         threading.Thread(target=self._send_worker, name="SCPI sender", daemon=True).start()
         self._connection: SCPIConnection | None = None
         self._last_connected: bool | None = None
 
-        # Queue of experiment sets; Run is possible once the user accepted every set.
         self._queue: list[QueueItem] = []
         self._queue_accepted = False
         self._runner: QueueRunner | None = None
-        self._viewer: ResultsViewer | None = None  # live results of the current run
+        self._worker: threading.Thread | None = None
+        self._viewer: ResultsViewer | None = None
         self._transients_done = 0
 
         self._system, source = load_system_settings()
@@ -108,14 +116,12 @@ class App(tk.Tk):
         try:
             self._ensure_results_dir()
         except OSError:
-            pass  # already logged; checked again before every run
+            pass
         self._connect()
 
         self.after(_STATUS_POLL_MS, self._poll_status)
         self.after(_LOG_POLL_MS, self._drain_log)
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-
-    # -------------------------------------------------------------------- UI
 
     def _build_ui(self) -> None:
         top = ttk.Frame(self, padding=8)
@@ -133,7 +139,6 @@ class App(tk.Tk):
         ttk.Label(top, text="Baud:").pack(side="left")
         self._baud = ttk.Entry(top, width=8)
         self._baud.pack(side="left", padx=(4, 8))
-        # Choosing a port (or Enter in either field) connects at once.
         self._port.bind("<<ComboboxSelected>>", lambda _e: self._connect())
         self._port.bind("<Return>", lambda _e: self._connect())
         self._baud.bind("<Return>", lambda _e: self._connect())
@@ -155,7 +160,6 @@ class App(tk.Tk):
         self._experiment_label = ttk.Label(run_bar, text="Queue: empty")
         self._experiment_label.pack(side="left")
         self._run_btn = ttk.Button(run_bar, text="Run", command=self._toggle_run, state="disabled")
-        # Until the device is available the results are simulated.
         self._simulate = tk.BooleanVar(value=True)
         ttk.Checkbutton(run_bar, text="Simulation", variable=self._simulate,
                         command=self._update_run_button).pack(side="right", padx=(0, 8))
@@ -226,8 +230,6 @@ class App(tk.Tk):
         self._connect_btn.config(text="Disconnect" if connected else "Connect")
         self._update_run_button()
 
-    # ------------------------------------------------------------ connection
-
     def _toggle_connection(self) -> None:
         if self._is_connected():
             self._disconnect()
@@ -254,7 +256,7 @@ class App(tk.Tk):
         )
         try:
             self._connection.connect()
-        except Exception as e:  # SerialException, ValueError for a bad URL...
+        except Exception as e:
             self._log("error", f"Cannot connect to {port}: {english_error(e)}")
         else:
             self._log("info", f"Connected to {port} ({baudrate} baud)")
@@ -280,13 +282,10 @@ class App(tk.Tk):
             self.after(_STATUS_POLL_MS, self._poll_status)
 
     def _on_message(self, message: Message) -> None:
-        # Called from the listener thread - hand over to the Tk thread via the queue.
         if isinstance(message, bytes):
             self._incoming.put(("recv", f"<< <binary block, {len(message)} B>"))
         else:
             self._incoming.put(("recv", f"<< {message}"))
-
-    # -------------------------------------------------------------- commands
 
     def _send_command(self) -> None:
         command = self._command.get().strip()
@@ -317,7 +316,7 @@ class App(tk.Tk):
                 else:
                     conn.write(command)
             except TypeError:
-                pass  # binary reply to a query - already shown by _on_message
+                pass
             except TimeoutError:
                 self._incoming.put(("error", f"No reply to {command!r}"))
             except Exception as e:
@@ -330,8 +329,6 @@ class App(tk.Tk):
             if self._history_pos < len(self._history):
                 self._command.insert(0, self._history[self._history_pos])
         return "break"
-
-    # --------------------------------------------------------- configuration
 
     def _load_connection_file(self) -> None:
         """Load connection settings from a system.json-style file and connect at once."""
@@ -353,7 +350,6 @@ class App(tk.Tk):
         settings = system.connection
         self._log("info", f"Loaded connection settings from {path.name}: {settings.port}, {settings.baudrate} baud")
         if system.hardware_limits != self._system.hardware_limits and self._queue_accepted:
-            # The queue was validated against the old limits.
             self._set_queue(self._queue, accepted=False)
             self._log("info", "Hardware limits changed - load and accept the queue again")
         self._system = system
@@ -385,7 +381,6 @@ class App(tk.Tk):
     def _review(self, item: QueueItem, index: int, total: int) -> bool:
         """Show the event timeline (and the AWG channels below it) of one set; True if accepted."""
         config, awg = item.config, item.awg
-        # Bars: configured event durations; :AWG:RUN lasts as long as the AWG sequence.
         durations = [
             awg.duration_s * 1000 if awg is not None and header_matches(e.action.strip().split(" ", 1)[0], ":AWG:RUN")
             else self._system.event_duration_ms(e.action)
@@ -429,8 +424,6 @@ class App(tk.Tk):
         self._experiment_label.config(text=text)
         self._update_run_button()
 
-    # ------------------------------------------------------------------- run
-
     def _update_run_button(self) -> None:
         if self._runner is not None:
             self._run_btn.config(text="Abort", state="normal")
@@ -458,8 +451,6 @@ class App(tk.Tk):
                 spec, self._queue, self._ensure_results_dir(), simulate=simulate,
                 on_status=lambda text: self._incoming.put(("status", text)),
                 on_progress=lambda *args: self._incoming.put(("progress", args)),
-                # The worker may already be on the next transient when the GUI draws this one,
-                # so the average and its count are taken now, in the worker thread.
                 on_result=lambda group, transient: self._incoming.put(
                     ("result", (group, transient, group.average, len(group.transients)))),
                 on_live=lambda group, number, data: self._incoming.put(("live", (group, number, data))),
@@ -467,14 +458,14 @@ class App(tk.Tk):
         except (ValueError, OSError) as e:
             self._log("error", f"Cannot start the queue: {english_error(e)}")
             return
-        # One step per transient of every set; a running transient adds its share of points.
         self._transients_done = 0
         self._progress_bar.config(maximum=sum(i.config.output.average_count for i in self._queue), value=0)
         self._viewer = None
         mode = " - SIMULATION" if simulate else ""
         self._log("info", f"Starting the queue ({len(self._queue)} set(s)){mode}")
         self._update_run_button()
-        threading.Thread(target=self._run_worker, args=(self._runner,), name="Queue", daemon=True).start()
+        self._worker = threading.Thread(target=self._run_worker, args=(self._runner,), name="Queue", daemon=True)
+        self._worker.start()
 
     def _run_worker(self, runner: QueueRunner) -> None:
         try:
@@ -532,15 +523,11 @@ class App(tk.Tk):
         if viewer is not None:
             viewer.add_transient(group, transient, average, count)
 
-    # ------------------------------------------------------------ AWG editor
-
     def _open_awg_editor(self) -> None:
         limits = self._system.hardware_limits
         AwgEditor(self, APP_DIR / "data" / "sequences", limits.max_awg_sample_rate_hz, limits.max_awg_amplitude_A,
                   on_saved=lambda path, w: self._log(
                       "info", f"AWG sequence saved: {path} ({w.n_samples} samples, {w.sample_rate_hz:g} Hz)"))
-
-    # --------------------------------------------------------------- results
 
     def _load_results(self) -> None:
         """Show the results of an earlier run: the user picks its whole folder."""
@@ -552,12 +539,18 @@ class App(tk.Tk):
                                          initialdir=initial, mustexist=True)
         if not folder:
             return
+        self._log("info", f"Loading results from {folder}...")
+        threading.Thread(target=self._load_results_worker, args=(folder,), name="Load results",
+                         daemon=True).start()
+
+    def _load_results_worker(self, folder: str) -> None:
+        """Read a results folder off the Tk thread: hundreds of files take seconds."""
         try:
-            result, warnings = load_results(folder)
-        except (HistoryError, OSError) as e:
-            self._log("error", f"Cannot load results: {english_error(e)}")
-            messagebox.showerror("Cannot load results", english_error(e), parent=self)
-            return
+            self._incoming.put(("history", load_results(folder)))
+        except (HistoryError, OSError, ValueError) as e:
+            self._incoming.put(("history_error", english_error(e)))
+
+    def _show_history(self, result: QueueResult, warnings: list[str]) -> None:
         for warning in warnings:
             self._log("error", f"   {warning}")
         sets = ", ".join(f"{g.name} ({len(g.transients)})" for g in result.groups)
@@ -566,7 +559,6 @@ class App(tk.Tk):
 
     def _results_dir(self) -> Path:
         path = self._system.data_output
-        # Relative paths are relative to APP_DIR, next to config/ and data/.
         return path if path.is_absolute() else APP_DIR / path
 
     def _ensure_results_dir(self) -> Path:
@@ -586,12 +578,10 @@ class App(tk.Tk):
         try:
             if sys.platform == "win32":
                 self.iconbitmap(default=str(ICON_DIR / "icon.ico"))
-            self._icon = tk.PhotoImage(file=str(ICON_DIR / "icon.png"))  # kept: Tk needs the image alive
+            self._icon = tk.PhotoImage(file=str(ICON_DIR / "icon.png"))
             self.iconphoto(True, self._icon)
         except (tk.TclError, OSError):
             log.warning("Window icon not found in %s", ICON_DIR)
-
-    # ------------------------------------------------------------------- log
 
     def _log(self, tag: str, text: str) -> None:
         if len(text) > _MAX_LOG_LINE:
@@ -599,41 +589,69 @@ class App(tk.Tk):
         stamp = datetime.now().strftime("%H:%M:%S")
         self._console.config(state="normal")
         self._console.insert("end", f"[{stamp}] {text}\n", tag)
+        lines = int(self._console.index("end-1c").split(".")[0])
+        if lines > _MAX_CONSOLE_LINES:
+            self._console.delete("1.0", f"{lines - _MAX_CONSOLE_LINES + 1}.0")
         self._console.see("end")
         self._console.config(state="disabled")
 
     def _drain_log(self) -> None:
-        live = None  # only the newest live data is drawn - older parts are already outdated
-        while True:
+        """Handle what the worker threads sent. Always scheduled again - an error in one
+        message must not stop the console, the progress and the plots for good - and
+        never longer than _DRAIN_BUDGET_S at a time, so a flood of messages (e.g. a device
+        sending without end) cannot freeze the window."""
+        try:
+            self._handle_incoming()
+        except Exception:
+            log.exception("Handling a message from a worker thread failed")
             try:
-                tag, text = self._incoming.get_nowait()
-            except queue.Empty:
-                break
-            if tag == "live":
-                live = text
-            elif tag == "progress":
-                self._show_progress(*text)
-            elif tag == "result":
-                group, transient = text[0], text[1]
-                if live is not None and (live[0].set_index, live[1]) == (group.set_index, transient.number):
-                    live = None  # the complete transient replaces it
-                self._show_result(*text)
-            elif tag == "status":
-                self._set_progress(text)
-                self._log("info", text)
-            elif tag == "finished":
-                self._runner = None
-                self._set_progress(text)
-                self._update_run_button()
-            else:
-                self._log(tag, text)
-        if live is not None:
-            self._show_live(*live)
-        self.after(_LOG_POLL_MS, self._drain_log)
+                self._log("error", "Internal error while showing data - see the log; the program goes on")
+            except tk.TclError:
+                pass
+        finally:
+            self.after(_LOG_POLL_MS, self._drain_log)
+
+    def _handle_incoming(self) -> None:
+        live = None
+        deadline = time.monotonic() + _DRAIN_BUDGET_S
+        try:
+            while time.monotonic() < deadline:
+                try:
+                    tag, text = self._incoming.get_nowait()
+                except queue.Empty:
+                    break
+                if tag == "live":
+                    live = text
+                elif tag == "progress":
+                    self._show_progress(*text)
+                elif tag == "result":
+                    group, transient = text[0], text[1]
+                    if live is not None and (live[0].set_index, live[1]) == (group.set_index, transient.number):
+                        live = None
+                    self._show_result(*text)
+                elif tag == "status":
+                    self._set_progress(text)
+                    self._log("info", text)
+                elif tag == "history":
+                    self._show_history(*text)
+                elif tag == "history_error":
+                    self._log("error", f"Cannot load results: {text}")
+                    messagebox.showerror("Cannot load results", text, parent=self)
+                elif tag == "finished":
+                    self._runner = None
+                    self._set_progress(text)
+                    self._update_run_button()
+                else:
+                    self._log(tag, text)
+        finally:
+            if live is not None:
+                self._show_live(*live)
 
     def _on_close(self) -> None:
         if self._runner is not None:
             self._runner.abort()
+            if self._worker is not None:
+                self._worker.join(timeout=_CLOSE_WAIT_S)
         self._disconnect(quiet=True)
         self._save_typed()
         self.destroy()
@@ -642,7 +660,6 @@ class App(tk.Tk):
 def main() -> None:
     logging.basicConfig(level=logging.INFO)
     if sys.platform == "win32":
-        # Own taskbar entry with the program's icon (not Python's) when run from Python.
         try:
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("DMTechnologies.ZULF-SCPI")
         except (AttributeError, OSError):

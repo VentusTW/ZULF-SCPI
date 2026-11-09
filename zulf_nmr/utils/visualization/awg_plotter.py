@@ -5,16 +5,15 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import matplotlib.pyplot as plt
 from matplotlib.figure import Figure, SubFigure
 
 from zulf_nmr.hardware.awg import RANGE_FULL_SCALE_A, AwgRange, AwgWaveform, load_awg_npz
 
-CHANNEL_COLOURS = ("#0072B2", "#E69F00", "#009E73", "#CC79A7")  # Okabe-Ito
+CHANNEL_COLOURS = ("#0072B2", "#E69F00", "#009E73", "#CC79A7")
 
 
 ACQUISITION_COLOUR = "#D55E00"
-_Y_MARGIN = 0.1  # of the data's span, above and below
+_Y_MARGIN = 0.1
 
 
 def _y_range(values_mA, full_scale_mA: float) -> tuple[float, float]:
@@ -40,12 +39,13 @@ def plot_awg(
     acquisition (zoom out to see a longer acquisition to its end).
     """
     if fig is None:
+        import matplotlib.pyplot as plt
+
         fig = plt.figure(figsize=(11, 7))
     n = len(waveform.ranges)
     if acquisition is None:
         axes = fig.subplots(n, 1, sharex=True)
     else:
-        # A thin strip above the channels shows the acquisition, so nothing covers the curves.
         strip, *axes = fig.subplots(n + 1, 1, sharex=True, height_ratios=[0.3] + [1] * n)
     t_ms = waveform.time_s() * 1000
     awg_end = waveform.duration_s * 1000
@@ -56,7 +56,6 @@ def plot_awg(
     for ch, (ax, range_, colour) in enumerate(zip(axes, waveform.ranges, CHANNEL_COLOURS), start=1):
         full_scale_mA = RANGE_FULL_SCALE_A[range_] * 1000
         values_mA = waveform.currents_A[:, ch - 1] * 1000
-        # Straight lines between the samples, not a staircase: the curve, not the DAC steps.
         ax.plot(t_ms, values_mA, color=colour, linewidth=1.4, solid_joinstyle="round", antialiased=True)
         ax.axhline(0, color="#D0D0D0", linewidth=0.8, zorder=0)
         ax.set_ylim(*_y_range(values_mA, full_scale_mA))
@@ -75,10 +74,9 @@ def plot_awg(
         strip.tick_params(axis="x", bottom=False)
         for side in ("top", "right", "left"):
             strip.spines[side].set_visible(False)
-        # In the strip's title: it stays in place when the plot is zoomed or the window resized.
         strip.set_title(f"Acquisition CH {', '.join(map(str, channels))}: {start:g} – {end:g} ms",
                         loc="left", fontsize=8, color=ACQUISITION_COLOUR, fontweight="bold", pad=2)
-        for ax in axes:  # thin lines only: the curves stay visible
+        for ax in axes:
             ax.axvline(start, color=ACQUISITION_COLOUR, linewidth=1.0, linestyle="--", zorder=1)
             ax.axvline(end, color=ACQUISITION_COLOUR, linewidth=1.0, linestyle="--", zorder=1)
     axes[-1].set_xlim(-0.02 * view_end, view_end * 1.02)
@@ -90,7 +88,7 @@ def plot_awg(
         fontweight="bold",
     )
     if isinstance(fig, Figure) and fig.get_layout_engine() is None:
-        fig.tight_layout()  # sub-figures and constrained layouts arrange themselves
+        fig.tight_layout()
     return fig
 
 
@@ -103,6 +101,8 @@ def main(argv: list[str] | None = None) -> None:
     if args.output:
         fig.savefig(args.output, dpi=150, bbox_inches="tight")
     else:
+        import matplotlib.pyplot as plt
+
         plt.show()
 
 

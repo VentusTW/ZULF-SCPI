@@ -15,7 +15,6 @@ class PlotPreview(tk.Toplevel):
     def __init__(self, parent: tk.Misc, title: str, figure: Figure, description: str = "") -> None:
         super().__init__(parent)
         self.title(title)
-        # As tall as the figure needs, but never taller than the screen.
         dpi = self.winfo_fpixels("1i")
         width = min(int(figure.get_figwidth() * dpi), self.winfo_screenwidth() - 80)
         height = min(int(figure.get_figheight() * dpi) + 90, self.winfo_screenheight() - 100)

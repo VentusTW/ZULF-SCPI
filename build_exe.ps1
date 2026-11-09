@@ -1,22 +1,28 @@
-# Builds exe\ZULF-SCPI.exe (a single file, no console window) and puts config\ and
-# data\ next to it - the executable reads and writes them there.
-# Existing files in exe\config and exe\data are kept, so edited settings survive a rebuild.
-# Usage: .\build_exe.ps1   (requires: .venv\Scripts\python -m pip install pyinstaller)
-
 Set-Location $PSScriptRoot
 
-# The logo: the .exe file's icon, and the assets folder inside it for the window icons.
-# Absolute paths - PyInstaller resolves relative ones against the spec folder (build\).
 $assets = (Resolve-Path zulf_nmr\gui\assets).Path
 
-# PyInstaller logs to stderr; with ErrorActionPreference=Stop Windows PowerShell
-# would treat that as a failure, so only the exit code is checked.
+$versionFile = (Resolve-Path zulf_nmr\version.py).Path
+$versionText = [IO.File]::ReadAllText($versionFile)
+$version = [regex]::Match($versionText, '(?m)^VERSION = "([^"]+)"').Groups[1].Value
+$build = [int][regex]::Match($versionText, '(?m)^BUILD = (\d+)').Groups[1].Value
+$builtFor = [regex]::Match($versionText, '(?m)^BUILT_FOR = "([^"]*)"').Groups[1].Value
+if ($builtFor -ne $version) { $build = 1 } else { $build += 1 }
+$newText = [regex]::Replace($versionText, '(?m)^BUILD = \d+', "BUILD = $build")
+$newText = [regex]::Replace($newText, '(?m)^BUILT_FOR = "[^"]*"', "BUILT_FOR = `"$version`"")
+[IO.File]::WriteAllText($versionFile, $newText)
+Write-Host "ZULF-SCPI $version.$build"
+
 & .venv\Scripts\python -m PyInstaller --noconfirm --clean --onefile --windowed `
     --name ZULF-SCPI --paths . `
     --icon "$assets\icon.ico" --add-data "$assets;zulf_nmr\gui\assets" `
     --distpath exe --workpath build --specpath build `
     zulf_nmr\gui\__main__.py 2>&1 | ForEach-Object { "$_" }
-if ($LASTEXITCODE -ne 0) { Write-Error "PyInstaller failed ($LASTEXITCODE)"; exit $LASTEXITCODE }
+if ($LASTEXITCODE -ne 0) {
+    [IO.File]::WriteAllText($versionFile, $versionText)
+    Write-Error "PyInstaller failed ($LASTEXITCODE) - build number not changed"
+    exit $LASTEXITCODE
+}
 $ErrorActionPreference = "Stop"
 
 foreach ($folder in "config", "data") {
@@ -33,4 +39,4 @@ foreach ($folder in "config", "data") {
             }
         }
 }
-Write-Host "Done: exe\ZULF-SCPI.exe"
+Write-Host "Done: exe\ZULF-SCPI.exe - version $version.$build"

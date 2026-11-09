@@ -12,35 +12,20 @@ from __future__ import annotations
 
 import re
 import struct
+import zlib
 from dataclasses import dataclass
 
 import numpy as np
 
 HEADER_VERSION = 2
-# Length of the whole header of every known header version.
 HEADER_LENGTHS = {1: 3, 2: 6}
 CHECKSUM_LENGTH = 4
 MAX_CHUNK_INDEX = 0xFFFFFFFF
 
-# ASSUMED (not stated in the documents): multi-byte header fields and the checksum are
-# little-endian, like the payload fields.
 _HEADER_V2 = struct.Struct("<BBI")
 _CHECKSUM = struct.Struct("<I")
 
-_POLYNOMIAL = 0x04C11DB7
-
-
-def _crc_table() -> np.ndarray:
-    table = np.zeros(256, dtype=np.uint32)
-    for byte in range(256):
-        crc = byte << 24
-        for _ in range(8):
-            crc = ((crc << 1) ^ _POLYNOMIAL) if crc & 0x80000000 else crc << 1
-        table[byte] = crc & 0xFFFFFFFF
-    return table
-
-
-_TABLE = _crc_table()
+_REVERSED_BITS = bytes(int(f"{b:08b}"[::-1], 2) for b in range(256))
 
 
 def crc32(data: bytes) -> int:
@@ -50,14 +35,15 @@ def crc32(data: bytes) -> int:
     ASSUMED: the words are read from memory as little-endian uint32 (as the STM32 does)
     and a block whose length is not a multiple of 4 is padded with zero bytes. Each word
     is processed from its most significant byte.
+
+    Computed with zlib's CRC-32 (the same polynomial, reflected, with a final XOR): fed
+    the bytes with their bits reversed, it gives the bit-reversed register of the
+    unreflected CRC - in C, a few hundred times faster than a loop in Python.
     """
     padded = data + bytes(-len(data) % 4)
-    words = np.frombuffer(padded, dtype="<u4")
-    crc = 0xFFFFFFFF
-    for word in words.tolist():
-        for shift in (24, 16, 8, 0):
-            crc = ((crc << 8) & 0xFFFFFFFF) ^ int(_TABLE[((crc >> 24) ^ (word >> shift)) & 0xFF])
-    return crc
+    msb_first = np.frombuffer(padded, dtype=np.uint8).reshape(-1, 4)[:, ::-1].tobytes()
+    register = zlib.crc32(msb_first.translate(_REVERSED_BITS)) ^ 0xFFFFFFFF
+    return int(f"{register:032b}"[::-1], 2)
 
 
 class BlockError(ValueError):
@@ -68,7 +54,7 @@ class BlockError(ValueError):
 class Block:
     header_version: int
     payload_version: int
-    chunk_index: int | None  # header version 2; None for version 1
+    chunk_index: int | None
     payload: bytes
 
 
@@ -91,8 +77,9 @@ def parse_block(data: bytes) -> Block:
     if len(data) < header_length + CHECKSUM_LENGTH:
         raise BlockError(f"block of {len(data)} B is too short for header version {header_version}")
     body, (checksum,) = data[:-CHECKSUM_LENGTH], _CHECKSUM.unpack(data[-CHECKSUM_LENGTH:])
-    if crc32(body) != checksum:
-        raise BlockError(f"checksum mismatch (got 0x{checksum:08X}, computed 0x{crc32(body):08X})")
+    computed = crc32(body)
+    if computed != checksum:
+        raise BlockError(f"checksum mismatch (got 0x{checksum:08X}, computed 0x{computed:08X})")
     chunk_index = _HEADER_V2.unpack(data[:6])[2] if header_version == 2 else None
     return Block(header_version, payload_version, chunk_index, body[header_length:])
 

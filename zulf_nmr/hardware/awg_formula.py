@@ -29,9 +29,6 @@ from zulf_nmr.hardware.awg import (
 MAX_SAMPLES = 1_000_000
 
 
-# ------------------------------------------------------------------ shapes
-
-
 def _shapes(t: np.ndarray) -> dict[str, object]:
     """Waveform building blocks; times in seconds, frequencies in Hz."""
 
@@ -71,7 +68,7 @@ def root(x, n, t: np.ndarray | None = None) -> np.ndarray:
     x, n = np.broadcast_arrays(np.asarray(x, dtype=float), np.asarray(n, dtype=float))
     if (n == 0).any():
         raise FormulaError("root(x, n): n must not be 0")
-    bad = (x < 0) & (np.mod(n, 2) != 1)  # np.mod(-3, 2) is 1, so odd negative n count as odd
+    bad = (x < 0) & (np.mod(n, 2) != 1)
     if bad.any():
         where = ""
         if t is not None and bad.shape == np.shape(t):
@@ -88,7 +85,6 @@ MATH = {
     "abs": np.abs, "sign": np.sign, "floor": np.floor, "ceil": np.ceil, "round": np.round,
     "min": np.minimum, "max": np.maximum,
 }
-# Units: times in s, frequencies in Hz, currents in mA (the unit of a formula's result).
 UNITS = {
     "s": 1.0, "sec": 1.0, "ms": 1e-3, "us": 1e-6, "ns": 1e-9,
     "Hz": 1.0, "kHz": 1e3, "MHz": 1e6,
@@ -96,7 +92,6 @@ UNITS = {
 }
 CONSTANTS = {"pi": np.pi, "e": np.e, **UNITS}
 
-# A unit right after a number ("1.6ms", "2 s", "5kHz") is multiplied with it: "(1.6*ms)".
 _NUMBER_UNIT = re.compile(
     r"(?<![\w.])((?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?)\s*("
     + "|".join(sorted(UNITS, key=len, reverse=True)) + r")(?![\w.])"
@@ -106,12 +101,10 @@ _NUMBER_UNIT = re.compile(
 def normalise(text: str) -> str:
     """The formula as Python: ^ is a power, a unit after a number multiplies it, µs is us."""
     text = text.replace("µ", "u").replace("μ", "u").replace("^", "**")
-    # In brackets, so the unit stays with its number: t/15ms is t/(15*ms), not (t/15)*ms.
     return _NUMBER_UNIT.sub(lambda m: f"({m.group(1)}*{m.group(2)})", text)
 
 
 SHAPES = ("step", "pulse", "ramp", "gauss", "hann", "chirp")
-# Number of arguments of every function (the math ones take 1 unless listed).
 ARITY = {"min": 2, "max": 2, "root": 2, "step": 1, "pulse": 2, "ramp": 2, "gauss": 2, "hann": 2, "chirp": 4, "data": 1}
 NAMES = ("t", *CONSTANTS, *MATH, *SHAPES, "data")
 
@@ -120,7 +113,7 @@ NAMES = ("t", *CONSTANTS, *MATH, *SHAPES, "data")
 class SourceData:
     """Samples of an opened .npz file, used by data(n) in formulas."""
 
-    currents_mA: np.ndarray  # (N, 4)
+    currents_mA: np.ndarray
     sample_rate_hz: float
     name: str = ""
 
@@ -152,9 +145,7 @@ def check_formula(text: str) -> ast.Expression:
         raise FormulaError("formula is too long")
     try:
         tree = ast.parse(normalise(text), mode="eval")
-    except SyntaxError as e:
-        # Usually a formula still being typed. No character position: it would count in the
-        # rewritten text (5ms -> (5*ms)), not in what the user sees.
+    except SyntaxError:
         missing = text.count("(") - text.count(")")
         if missing > 0:
             raise FormulaError(f"missing {')' * missing}") from None
@@ -199,7 +190,7 @@ def evaluate_formula(text: str, t: np.ndarray, source: SourceData | None = None)
     names = {"t": t, **CONSTANTS, **MATH, "root": lambda x, n: root(x, n, t), **_shapes(t), "data": data}
     try:
         with np.errstate(all="ignore"):
-            value = eval(compile(tree, "<formula>", "eval"), {"__builtins__": {}}, names)  # checked above
+            value = eval(compile(tree, "<formula>", "eval"), {"__builtins__": {}}, names)
         value = np.broadcast_to(np.asarray(value, dtype=float), t.shape).copy()
     except FormulaError:
         raise
@@ -212,9 +203,6 @@ def evaluate_formula(text: str, t: np.ndarray, source: SourceData | None = None)
         raise FormulaError(f"not a finite number at t = {bad * 1000:g} ms "
                            "(e.g. division by 0, log of 0, a fractional power of a negative number)")
     return value
-
-
-# --------------------------------------------------------------- waveform
 
 
 @dataclass

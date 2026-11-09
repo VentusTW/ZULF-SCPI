@@ -7,7 +7,6 @@ import re
 import tkinter as tk
 from tkinter import ttk
 
-# Argument names shown as hints; the one-argument math functions take "x".
 SIGNATURES: dict[str, tuple[str, ...]] = {
     "step": ("t0",), "pulse": ("t0", "t1"), "ramp": ("t0", "t1"), "gauss": ("t0", "sigma"),
     "hann": ("t0", "t1"), "chirp": ("f0", "f1", "t0", "t1"), "data": ("n",),
@@ -25,19 +24,17 @@ def formula_hint(text: str) -> str:
     "pul" -> "se(t0, t1)", "pulse(" -> "t0, t1)", "pulse(5ms" -> ", t1)",
     "pulse(5ms, " -> "t1)", "chirp(100Hz, 800Hz, 1ms, 2ms" -> ")".
     """
-    # The start of a function name that only one function has: complete it.
     match = _NAME_AT_END.search(text)
     if match and not text[:match.start()].rstrip().endswith(tuple("0123456789.")):
         word = match.group(1)
-        if word in SIGNATURES:  # a whole name, no bracket yet
+        if word in SIGNATURES:
             return f"({', '.join(SIGNATURES[word])})"
         names = [n for n in SIGNATURES if n.startswith(word)]
         if len(names) == 1:
             name = names[0]
             return f"{name[len(word):]}({', '.join(SIGNATURES[name])})"
 
-    # Innermost call still open: which argument is being typed.
-    calls: list[list] = []  # [name, commas, characters typed since the last ( or ,]
+    calls: list[list] = []
     for i, ch in enumerate(text):
         if ch == "(":
             before = _NAME_AT_END.search(text[:i].rstrip())
@@ -55,7 +52,7 @@ def formula_hint(text: str) -> str:
         return ""
     name, index, current = calls[-1]
     params = SIGNATURES[name]
-    if current.strip():  # an argument is being typed: show the ones after it
+    if current.strip():
         rest = params[index + 1:]
         return (", " + ", ".join(rest) if rest else "") + ")"
     return ", ".join(params[index:]) + ")"

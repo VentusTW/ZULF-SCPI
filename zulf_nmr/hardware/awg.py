@@ -25,32 +25,17 @@ log = logging.getLogger(__name__)
 
 N_CHANNELS = 4
 
-# :AWG:DATA? payload version 2 (awg_data.md): records of
-#   delay (UInt16) - distance from the previous record in samples (1 = the next sample;
-#                    more = the device fills the samples between by linear approximation)
-#   4 x DAC value (UInt16), channels X, Y, Z, S = 1, 2, 3, 4
 DATA_PAYLOAD_VERSION = 2
 DATA_RECORD = np.dtype([("delay", "<u2"), ("dac", "<u2", (N_CHANNELS,))])
-# :AWG:GATing? payload version 2 (awg_gating.md): records of
-#   delay (UInt16) - distance from the previous record in samples
-#   4 x EN toggle offset (UInt16) - us from the start of that sample period to the toggle
-#                                   of the channel's EN signal; NO_TOGGLE = do not toggle
 GATING_PAYLOAD_VERSION = 2
 GATING_RECORD = np.dtype([("delay", "<u2"), ("toggle_us", "<u2", (N_CHANNELS,))])
 NO_TOGGLE = 0xFFFF
 MAX_DELAY = 0xFFFF
-# ASSUMED: records per chunk (the documents set no limit); 1000 records = 10 kB.
 CHUNK_RECORDS = 1000
-# ASSUMED: the first record's delay is counted from sample 0, so a record for sample 0
-# has delay 0; the documents only define the distance between two records.
-# ASSUMED: the DAC values are offset binary - 0 = -full scale, 0x8000 = 0 A,
-# 0xFFFF = +full scale (the documents say UInt16 without the coding).
 DAC_ZERO = 0x8000
 DAC_HALF_SPAN = 0x7FFF
-# A chunk whose checksum the device rejects is sent again this many times.
 CRC_RETRIES = 3
 
-# err-<code> replies of :AWG:DATA? and :AWG:GATing?
 UPLOAD_ERRORS = {
     1: "repeated block - rejected",
     2: "block not in order - rejected",
@@ -62,8 +47,8 @@ UPLOAD_ERRORS = {
 
 
 class AwgRange(IntEnum):
-    LOW = 0  # 10 mA full scale
-    HIGH = 1  # 1 A full scale
+    LOW = 0
+    HIGH = 1
 
 
 RANGE_FULL_SCALE_A = {AwgRange.LOW: 0.010, AwgRange.HIGH: 1.0}
@@ -101,7 +86,6 @@ def data_records(codes: np.ndarray) -> np.ndarray:
     if n > 2:
         keep[1:-1] = np.any(codes[2:] - 2 * codes[1:-1] + codes[:-2] != 0, axis=1)
     indexes = np.flatnonzero(keep)
-    # A gap longer than a delay can say gets the samples at every MAX_DELAY.
     gaps = np.diff(indexes)
     if gaps.size and gaps.max() > MAX_DELAY:
         filled = [indexes[0]]
@@ -131,7 +115,7 @@ def gating_records(enable: np.ndarray, sample_rate_hz: float) -> np.ndarray:
     rows: list[tuple[int, list[int]]] = []
     previous = 0
     for index in np.flatnonzero(changed.any(axis=1)):
-        while index - previous > MAX_DELAY:  # filler record: nothing toggles
+        while index - previous > MAX_DELAY:
             previous += MAX_DELAY
             rows.append((previous, [NO_TOGGLE] * N_CHANNELS))
         rows.append((int(index), [0 if c else NO_TOGGLE for c in changed[index]]))
@@ -148,21 +132,11 @@ def chunks(records: np.ndarray, size: int = CHUNK_RECORDS) -> list[np.ndarray]:
     return [records[i:i + size] for i in range(0, len(records), size)] or [records[:0]]
 
 
-# ASSUMED .npz layout of an AWG sequence file (not defined by the firmware):
-#   currents_A      float (N, 4)  channel currents in A, one row per sample
-#   sample_rate_hz  float scalar  DAC sample rate
-#   ranges          int   (4,)    optional, AwgRange per channel (default: HIGH)
-#   enable          int   (N, 4)  optional, non-zero = EN on (default: on for the whole sequence)
-#   formulas        str   (4,)    optional, written by the AWG editor (not sent to the device)
-#   duration_ms     float scalar  optional, written by the AWG editor
-#   data_currents_A, data_sample_rate_hz  optional, the file a data(n) formula refers to
-
-
 @dataclass(frozen=True)
 class AwgWaveform:
     """AWG sequence loaded from an .npz file, ready to upload."""
 
-    currents_A: np.ndarray  # (N, 4)
+    currents_A: np.ndarray
     sample_rate_hz: float
     ranges: tuple[AwgRange, ...]
     enable: np.ndarray | None = None
@@ -243,7 +217,7 @@ def load_awg_npz(
                          f"got {np.shape(enable)}")
     waveform = AwgWaveform(currents, rate, ranges, enable, source_path=path)
     try:
-        waveform.data_records()  # range check
+        waveform.data_records()
         waveform.gating_records()
     except ValueError as e:
         raise ValueError(f"{path}: {e}") from None
@@ -268,15 +242,12 @@ class Awg:
         self.max_sample_rate_hz = max_sample_rate_hz
         self.max_amplitude_A = max_amplitude_A
 
-    # ------------------------------------------------------------ waveform
-
     def upload(self, waveform: AwgWaveform) -> None:
         """Reset the AWG, send the sample rate and the range of every channel, then the
         samples (:AWG:DATA?) and the enable signals (:AWG:GATing?) chunk by chunk."""
         if np.abs(waveform.currents_A).max(initial=0) > self.max_amplitude_A:
             raise ValueError(f"AWG amplitude exceeds the limit of +/-{self.max_amplitude_A} A")
         data, gating = waveform.data_records(), waveform.gating_records()
-        # ASSUMED: :AWG:RST starts the chunk indexes of both commands from 0 again.
         self.reset()
         self.set_sample_rate(waveform.sample_rate_hz)
         for channel, range_ in zip(self.CHANNELS, waveform.ranges):
@@ -310,8 +281,6 @@ class Awg:
                 meaning = UPLOAD_ERRORS.get(code, "unknown error")
                 raise AwgUploadError(f"{command} chunk {index}: err-{code} ({meaning})")
 
-    # ---------------------------------------------------------------- clock
-
     def set_sample_rate(self, rate_hz: float) -> None:
         """:AWG:SAMPle:RATE <MHz> - baseline time step between DAC samples."""
         if not 0 < rate_hz <= self.max_sample_rate_hz:
@@ -322,9 +291,7 @@ class Awg:
 
     def get_sample_rate(self) -> float:
         """:AWG:SAMPle:RATE? - sample rate in Hz (the device reports MHz)."""
-        return self._query_float(":AWG:SAMP:RATE?") * 1e6
-
-    # ---------------------------------------------------------------- range
+        return self._conn.query_float(":AWG:SAMP:RATE?", ":AWG:SAMPle:RATE?") * 1e6
 
     def set_range(self, channel: int, range_: AwgRange | int) -> None:
         """:AWG:RANGe <ch>, <bol> - 0 = LOW (10 mA), 1 = HIGH (1 A)."""
@@ -340,8 +307,6 @@ class Awg:
         except ValueError:
             raise ValueError(f"Unexpected :AWG:RANGe? reply: {reply!r}") from None
 
-    # -------------------------------------------------------------- control
-
     def run(self) -> None:
         """:AWG:RUN - software trigger of the AWG sequence."""
         self._conn.write(":AWG:RUN")
@@ -350,15 +315,6 @@ class Awg:
         """:AWG:RST - reset AWG data and flags."""
         self._conn.write(":AWG:RST")
 
-    # -------------------------------------------------------------- helpers
-
     def _check_channel(self, channel: int) -> None:
         if channel not in self.CHANNELS:
             raise ValueError(f"AWG channel must be one of {self.CHANNELS}, got {channel!r}")
-
-    def _query_float(self, command: str) -> float:
-        reply = self._conn.query(command).strip()
-        try:
-            return float(reply)
-        except ValueError:
-            raise ValueError(f"Unexpected {command} reply: {reply!r}") from None
