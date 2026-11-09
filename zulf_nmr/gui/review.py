@@ -203,6 +203,11 @@ class ReviewPanel(ttk.Frame):
         if not accepted:
             self.ok_btn.focus_set()
 
+    def restyle(self) -> None:
+        """Draw the plots again in the colours of the current theme."""
+        if self._items:
+            self.show(self._items, self._index, self._system, self._accepted)
+
     def set_locked(self, locked: bool) -> None:
         """While the queue runs, the review cannot be answered."""
         self._locked = locked

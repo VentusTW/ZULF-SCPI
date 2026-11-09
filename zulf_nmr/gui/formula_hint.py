@@ -16,7 +16,6 @@ SIGNATURES: dict[str, tuple[str, ...]] = {
     **{name: ("x",) for name in ("sin", "cos", "tan", "asin", "acos", "atan", "sinh", "cosh", "tanh",
                                  "exp", "log", "log10", "sqrt", "abs", "sign", "floor", "ceil", "round")},
 }
-HINT_COLOUR = theme.DIM
 _NAME_AT_END = re.compile(r"([A-Za-z_]\w*)$")
 
 
@@ -67,7 +66,7 @@ class GhostText:
     def __init__(self, entry: ttk.Entry, example: str) -> None:
         self.entry = entry
         self.example = example
-        self.label = tk.Label(entry, text="", fg=HINT_COLOUR, bg=theme.FIELD, bd=0, padx=0, pady=0,
+        self.label = tk.Label(entry, text="", fg=theme.DIM, bg=theme.FIELD, bd=0, padx=0, pady=0,
                               font=entry.cget("font"), cursor="xterm")
         self.label.bind("<Button-1>", self._click)
         for event in ("<KeyRelease>", "<ButtonRelease-1>", "<FocusIn>", "<FocusOut>", "<Configure>"):

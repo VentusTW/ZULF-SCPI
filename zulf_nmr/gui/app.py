@@ -109,8 +109,8 @@ class NavItem(tk.Frame):
         self._active = active
         self._paint()
 
-    def set_badge(self, text: str, colour: str = theme.MUTED) -> None:
-        self._badge_colour = colour
+    def set_badge(self, text: str, colour: str | None = None) -> None:
+        self._badge_colour = colour or theme.MUTED
         self._badge.config(text=text.upper())
         self._paint()
 
@@ -124,15 +124,20 @@ class NavItem(tk.Frame):
             widget.config(background=background)
         self._bar.config(background=theme.ACCENT if self._active else background)
         self._icon.config(foreground=theme.ACCENT if self._active else theme.MUTED)
-        self._text.config(foreground=theme.TEXT if self._active or self._hover else "#c3cede")
+        self._text.config(foreground=theme.TEXT if self._active or self._hover else theme.NAV_TEXT)
         self._badge.config(foreground=self._badge_colour)
+
+    def recolor(self, mapping: dict[str, str]) -> None:
+        self._badge_colour = mapping.get(self._badge_colour.lower(), self._badge_colour)
+        self._paint()
 
 
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
-        theme.apply_theme(self)
-        self.title(f"ZULF-SCPI {version_text()}")
+        saved_theme = user_settings.load_section(_SETTINGS).get("theme")
+        theme.apply_theme(self, saved_theme if saved_theme in theme.THEMES else "dark")
+        self.title("ZULF-SCPI")
         self._set_icon()
         self.geometry("1280x820")
         self.minsize(1040, 660)
@@ -160,7 +165,8 @@ class App(tk.Tk):
         self._panels: dict[str, ttk.Frame | None] = {}
         self._current: str | None = None
         self._build_ui()
-        theme.dark_title_bar(self)
+        theme.title_bar(self)
+        theme.hide_title_icon(self)
         self._log("info", f"ZULF-SCPI {version_text()}")
         self._log("info", self._system_note)
         self._apply_settings_to_fields(self._settings)
@@ -183,7 +189,9 @@ class App(tk.Tk):
 
         self._build_top_bar().grid(row=0, column=0, columnspan=2, sticky="ew")
         tk.Frame(self, height=1, background=theme.BORDER).grid(row=1, column=0, columnspan=2, sticky="ew")
-        self._build_sidebar().grid(row=2, column=0, sticky="ns")
+        self._sidebar = self._build_sidebar()
+        self._sidebar.grid(row=2, column=0, sticky="ns")
+        self.sidebar_shown = True
         self._content = ttk.Frame(self)
         self._content.grid(row=2, column=1, sticky="nsew")
         tk.Frame(self, height=1, background=theme.BORDER).grid(row=3, column=0, columnspan=2, sticky="ew")
@@ -205,11 +213,17 @@ class App(tk.Tk):
                         "results": self._results, "awg": None, "system": self._system_panel}
         for number, (name, _text, _icon) in enumerate(PANELS, start=1):
             self.bind_all(f"<Control-Key-{number}>", lambda _e, n=name: self.show_panel(n))
+        self.bind_all("<Control-Key-b>", lambda _e: self._toggle_sidebar())
         self.show_panel("console")
+        if user_settings.load_section(_SETTINGS).get("sidebar") is False:
+            self._toggle_sidebar()
         self._console.command.focus_set()
 
     def _build_top_bar(self) -> ttk.Frame:
-        bar = ttk.Frame(self, style="Surface.TFrame", padding=(14, 8, 14, 8))
+        bar = ttk.Frame(self, style="Surface.TFrame", padding=(10, 8, 14, 8))
+        menu = ttk.Button(bar, text="☰", style="Small.TButton", width=3, command=self._toggle_sidebar)
+        menu.pack(side="left", padx=(0, 12))
+        Tooltip(menu, "Hide or show the menu on the left  (Ctrl+B)")
         try:
             image = Image.open(ICON_DIR / "icon.png").convert("RGBA").resize((_LOGO_PX, _LOGO_PX), Image.LANCZOS)
             self._logo = ImageTk.PhotoImage(image, master=self)
@@ -235,8 +249,7 @@ class App(tk.Tk):
         self._mode_badge.pack(side="left", padx=(12, 0), ipady=3)
         self._queue_badge = theme.Badge(bar, "", theme.MUTED)
         self._queue_badge.pack(side="left", padx=(8, 0), ipady=3)
-        self._run_badge = theme.Badge(bar, "", theme.MUTED)
-        self._run_badge.pack(side="left", padx=(8, 0), ipady=3)
+        self._run_badge = theme.Badge(bar, "running", theme.ACCENT)
 
         self._abort_btn = ttk.Button(bar, text="■  ABORT", style="Danger.TButton", width=11, command=self._abort)
         self._abort_btn.pack(side="right")
@@ -247,6 +260,10 @@ class App(tk.Tk):
         simulate = ttk.Checkbutton(bar, text="SIMULATION", variable=self._simulate, style="Surface.TCheckbutton",
                                    command=self._update_run_button)
         simulate.pack(side="right", padx=(0, 18))
+        self._theme_btn = ttk.Button(bar, text="", style="Small.TButton", width=9, command=self._toggle_theme)
+        self._theme_btn.pack(side="right", padx=(0, 14))
+        self._show_theme_button()
+        Tooltip(self._theme_btn, "Switch between the dark and the light colours")
         Tooltip(simulate, "Run the queue without the instrument: the data are simulated")
         Tooltip(self._abort_btn, "Abort the running queue (sends *RST to the instrument)")
         return bar
@@ -263,11 +280,8 @@ class App(tk.Tk):
             item.pack(side="top", fill="x")
             self._nav[name] = item
 
-        tk.Label(side, text=f"BUILD {version_text()}", background=theme.FIELD, foreground=theme.MUTED,
-                 font=theme.mono(8), pady=6, highlightthickness=1,
-                 highlightbackground=theme.BORDER).pack(side="bottom", fill="x", padx=12, pady=(0, 12))
         box = tk.Frame(side, background=theme.SURFACE)
-        box.pack(side="bottom", fill="x", padx=16, pady=(0, 10))
+        box.pack(side="bottom", fill="x", padx=16, pady=(0, 16))
         tk.Frame(side, height=1, background=theme.BORDER).pack(side="bottom", fill="x", pady=(0, 10))
         self._state: dict[str, tk.Label] = {}
         for key in ("Link", "Mode", "Queue", "Run", "Transients"):
@@ -278,8 +292,6 @@ class App(tk.Tk):
             value = tk.Label(row, text="", background=theme.SURFACE, foreground=theme.TEXT, font=theme.mono(8))
             value.pack(side="right")
             self._state[key] = value
-        self._side_progress = ttk.Progressbar(box, mode="determinate")
-        self._side_progress.pack(side="top", fill="x", pady=(6, 0))
         return side
 
     def _build_status_bar(self) -> ttk.Frame:
@@ -287,7 +299,7 @@ class App(tk.Tk):
         self._progress_label = ttk.Label(bar, text="Ready", style="Surface.TLabel", foreground=theme.MUTED,
                                          font=theme.mono(9))
         self._progress_label.pack(side="left")
-        ttk.Label(bar, text="Ctrl+1…6 switch consoles", style="Surface.TLabel", foreground=theme.DIM,
+        ttk.Label(bar, text="Ctrl+1…6 switch consoles   Ctrl+B menu", style="Surface.TLabel", foreground=theme.DIM,
                   font=theme.mono(8)).pack(side="right")
         self._progress_bar = ttk.Progressbar(bar, length=260, mode="determinate")
         self._progress_bar.pack(side="right", padx=(0, 18))
@@ -347,7 +359,33 @@ class App(tk.Tk):
             "baudrate": self._console.baud.get().strip(),
             "simulation": self._simulate.get(),
             "command_history": self._console.history[-MAX_SAVED_HISTORY:],
+            "theme": theme.current(),
+            "sidebar": self.sidebar_shown,
         })
+
+    def _toggle_sidebar(self) -> None:
+        """Hide the menu on the left (the consoles get the whole width) or show it again."""
+        if self.sidebar_shown:
+            self._sidebar.grid_remove()
+        else:
+            self._sidebar.grid()
+        self.sidebar_shown = not self.sidebar_shown
+
+    def _show_theme_button(self) -> None:
+        self._theme_btn.config(text="☀  Light" if theme.current() == "dark" else "☾  Dark")
+
+    def _toggle_theme(self) -> None:
+        """Dark <-> light: repaint the window and draw the plots again."""
+        theme.switch(self, "light" if theme.current() == "dark" else "dark")
+        self._show_theme_button()
+        self._review.restyle()
+        if self._panels.get("awg") is not None:
+            self._panels["awg"].restyle()
+        self._results.restyle()
+        self._last_connected = None
+        self._poll_status(reschedule=False)
+        self._progress_label.config(foreground=theme.TEXT if self._runner else theme.MUTED)
+        self._refresh_state()
 
     def _set_status(self, connected: bool) -> None:
         port, baud = self._settings.port, self._settings.baudrate
@@ -556,7 +594,11 @@ class App(tk.Tk):
             queue_text, colour = f"queue {n} set(s) · not accepted", theme.WARNING
         self._queue_badge.set(queue_text, colour)
         self._state["Queue"].config(text=queue_text.removeprefix("queue ").upper(), foreground=colour)
-        self._run_badge.set("running" if running else "idle", theme.ACCENT if running else theme.MUTED)
+        if running and not self._run_badge.winfo_manager():
+            self._run_badge.set("running", theme.ACCENT)
+            self._run_badge.pack(side="left", padx=(8, 0), ipady=3, after=self._queue_badge)
+        elif not running and self._run_badge.winfo_manager():
+            self._run_badge.pack_forget()
         self._state["Run"].config(text="RUNNING" if running else "IDLE",
                                   foreground=theme.ACCENT if running else theme.MUTED)
         total = float(self._progress_bar["maximum"])
@@ -602,7 +644,6 @@ class App(tk.Tk):
         self._transients_done = 0
         total = sum(i.config.output.average_count for i in self._queue)
         self._progress_bar.config(maximum=total, value=0)
-        self._side_progress.config(maximum=total, value=0)
         self._viewer = None
         mode = " - SIMULATION" if simulate else ""
         self._log("info", f"Starting the queue ({len(self._queue)} set(s)){mode}")
@@ -646,14 +687,12 @@ class App(tk.Tk):
         self._update_run_button()
 
     def _set_progress(self, text: str, value: float | None = None) -> None:
-        """Progress bar and text in the status bar, the sidebar and the live results tab."""
+        """Progress bar and text in the status bar; the text also in the live results tab."""
         if value is not None:
             self._progress_bar.config(value=value)
-            self._side_progress.config(value=value)
         self._progress_label.config(text=text, foreground=theme.TEXT if self._runner else theme.MUTED)
         if self._viewer is not None and self._viewer.winfo_exists():
-            self._viewer.set_progress(float(self._progress_bar["value"]),
-                                      float(self._progress_bar["maximum"]), text)
+            self._viewer.set_status(text)
         self._refresh_state()
 
     def _show_progress(self, set_index: int, transient: int, received: int, expected: int) -> None:

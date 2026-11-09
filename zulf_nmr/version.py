@@ -3,7 +3,7 @@ BUILD and BUILT_FOR are written by build_exe.ps1, which counts the builds of the
 of every version from 1 again. The build is never 0: before the first build of a
 version it is 1, and that first build keeps 1."""
 
-VERSION = "0.5.0"
+VERSION = "0.5.1"
 BUILD = 1
 BUILT_FOR = "0.5.0"
 

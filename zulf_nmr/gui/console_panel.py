@@ -17,10 +17,11 @@ from zulf_nmr.gui.tooltip import Tooltip
 MAX_LINES = 5000
 MAX_LINE = 300
 MAX_SAVED_HISTORY = 100
-QUICK_COMMANDS = (("*IDN?", "Ask the device for its identification"),
-                  ("*OPC?", "Ask whether all earlier commands are complete"),
-                  ("*CLS", "Clear the device's status and error queue"))
-TAG_COLOURS = {"sent": theme.ACCENT, "recv": theme.OK, "error": theme.DANGER, "info": theme.MUTED}
+
+
+def tag_colours() -> dict[str, str]:
+    """Colours of the console lines in the current theme."""
+    return {"sent": theme.ACCENT, "recv": theme.OK, "error": theme.DANGER, "info": theme.MUTED}
 
 
 class ConsolePanel(ttk.Frame):
@@ -78,7 +79,7 @@ class ConsolePanel(ttk.Frame):
         legend = ttk.Frame(head, style="Card.TFrame")
         legend.pack(side="left", padx=16)
         for name, tag in (("sent", "sent"), ("received", "recv"), ("error", "error"), ("info", "info")):
-            ttk.Label(legend, text="●", style="Card.TLabel", foreground=TAG_COLOURS[tag],
+            ttk.Label(legend, text="●", style="Card.TLabel", foreground=tag_colours()[tag],
                       font=theme.sans(9)).pack(side="left")
             ttk.Label(legend, text=name, style="Card.TLabel", foreground=theme.MUTED,
                       font=theme.mono(8)).pack(side="left", padx=(2, 10))
@@ -91,7 +92,7 @@ class ConsolePanel(ttk.Frame):
         self._text.vbar.config(background=theme.RAISED, troughcolor=theme.FIELD, borderwidth=0,
                                activebackground=theme.RAISED_HOVER, highlightthickness=0)
         self._text.pack(side="top", fill="both", expand=True)
-        for tag, colour in TAG_COLOURS.items():
+        for tag, colour in tag_colours().items():
             self._text.tag_config(tag, foreground=colour)
         self._text.tag_config("stamp", foreground=theme.DIM)
 
@@ -105,10 +106,6 @@ class ConsolePanel(ttk.Frame):
         self.command.bind("<Up>", lambda _e: self._history_step(-1))
         self.command.bind("<Down>", lambda _e: self._history_step(1))
         ttk.Button(command, text="Send", style="Accent.TButton", command=self._send_typed).pack(side="left")
-        for text, tip in QUICK_COMMANDS:
-            button = ttk.Button(command, text=text, style="Small.TButton", command=lambda c=text: self._on_send(c))
-            button.pack(side="left", padx=(6, 0))
-            Tooltip(button, tip)
 
     def log(self, tag: str, text: str) -> None:
         if len(text) > MAX_LINE:

@@ -12,8 +12,6 @@ from matplotlib.axes import Axes
 
 from zulf_nmr.utils.visualization import plot_style
 
-CHANNEL_COLOURS = dict(enumerate(plot_style.SERIES, start=1))
-AVERAGE_BACKGROUND = "#15151f"
 _MAX_POINTS = 200000
 _SMOOTH_FACTOR = 8
 _DENSE = 4
@@ -35,7 +33,7 @@ def smooth_for_display(data: np.ndarray, sample_rate_hz: float) -> tuple[np.ndar
 
 
 def channel_colour(channel: int) -> str:
-    return CHANNEL_COLOURS.get(channel, plot_style.MUTED)
+    return plot_style.series(channel - 1)
 
 
 def spectrum(data: np.ndarray, sample_rate_hz: float) -> tuple[np.ndarray, np.ndarray]:
@@ -141,7 +139,7 @@ def _style(ax: Axes, average: bool) -> None:
     ax.tick_params(labelsize=8)
     ax.grid(linestyle="--", alpha=0.4)
     if average:
-        ax.set_facecolor(AVERAGE_BACKGROUND)
+        ax.set_facecolor(plot_style.AVERAGE_BACKGROUND)
     for side in ("top", "right"):
         ax.spines[side].set_visible(False)
 

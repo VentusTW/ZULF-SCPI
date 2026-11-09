@@ -12,7 +12,6 @@ from pathlib import Path
 from tkinter import messagebox, ttk
 from typing import Callable
 
-from zulf_nmr.core.connection import APP_DIR
 from zulf_nmr.core.errors import english_error
 from zulf_nmr.experiment.parser import SystemConfig
 from zulf_nmr.gui import theme, user_settings
@@ -24,7 +23,6 @@ _LIMIT_NAMES = {
     "max_awg_sample_rate_hz": ("Max AWG sample rate", "Hz"),
     "motor_timeout_s": ("Motor timeout", "s"),
 }
-TELEMETRY = ("Magnetic field", "Shim power", "Temperature")
 
 
 def open_folder(path: Path) -> None:
@@ -62,13 +60,6 @@ class SystemPanel(ttk.Frame):
         self._limits = self._section(columns, "Hardware limits (checked in every experiment file)", 1, 0)
         self._durations = self._section(columns, "Event durations used on the timeline", 1, 1)
         self._folders = self._section(columns, "Folders", 2, 0)
-        telemetry = self._section(columns, "Instrument telemetry", 2, 1)
-        for name in TELEMETRY:
-            self._pair(telemetry, name, "not available", theme.DIM)
-        ttk.Label(telemetry, text="The instrument does not report these values yet; they will be shown "
-                                  "here when the firmware sends them.", style="Card.TLabel",
-                  foreground=theme.DIM, font=theme.sans(9), wraplength=520, justify="left").pack(
-            side="top", anchor="w", pady=(8, 0))
 
     def _section(self, parent: tk.Misc, title: str, row: int, column: int) -> ttk.Frame:
         card = theme.card(parent, padding=12)
@@ -80,12 +71,12 @@ class SystemPanel(ttk.Frame):
         body.pack(side="top", fill="x")
         return body
 
-    def _pair(self, parent: ttk.Frame, key: str, value: str, colour: str = theme.TEXT) -> None:
+    def _pair(self, parent: ttk.Frame, key: str, value: str, colour: str | None = None) -> None:
         row = ttk.Frame(parent, style="Card.TFrame")
         row.pack(side="top", fill="x", pady=1)
         ttk.Label(row, text=key, style="Card.TLabel", foreground=theme.MUTED, font=theme.mono(9),
                   width=30).pack(side="left")
-        ttk.Label(row, text=value, style="Card.TLabel", foreground=colour, font=theme.mono(9)).pack(side="left")
+        ttk.Label(row, text=value, style="Card.TLabel", foreground=colour or theme.TEXT, font=theme.mono(9)).pack(side="left")
 
     @staticmethod
     def _clear(frame: ttk.Frame) -> None:
@@ -110,7 +101,6 @@ class SystemPanel(ttk.Frame):
             self._pair(self._durations, command, f"{ms:g} ms")
         results = self._results_dir()
         self._folder_row("Results", results)
-        self._folder_row("Program", APP_DIR)
         self._folder_row("Saved typed values", user_settings.SETTINGS_FILE.parent)
 
     def _folder_row(self, name: str, path: Path) -> None:

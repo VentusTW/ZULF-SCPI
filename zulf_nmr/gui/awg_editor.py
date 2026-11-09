@@ -24,7 +24,8 @@ from zulf_nmr.hardware.awg_formula import (
 from zulf_nmr.gui import theme, user_settings
 from zulf_nmr.gui.formula_hint import GhostText
 from zulf_nmr.gui.tooltip import Tooltip
-from zulf_nmr.utils.visualization.awg_plotter import CHANNEL_COLOURS, plot_awg
+from zulf_nmr.utils.visualization import plot_style
+from zulf_nmr.utils.visualization.awg_plotter import plot_awg
 
 PREVIEW_DELAY_MS = 150
 _RANGES = {"HIGH (1 A)": AwgRange.HIGH, "LOW (10 mA)": AwgRange.LOW}
@@ -127,6 +128,16 @@ class AwgEditorPanel(ttk.Frame):
         self.save_settings()
         super().destroy()
 
+    def restyle(self) -> None:
+        """Draw the preview again in the colours of the current theme."""
+        self._drawn = None
+        self._figure.clear()
+        self._figure.set_facecolor(plot_style.PANEL)
+        if self._waveform is not None:
+            self._draw_preview()
+        else:
+            self._canvas.draw_idle()
+
     def save_settings(self) -> None:
         user_settings.save_section(_SETTINGS, {
             "sample_rate_hz": self._rate.get(),
@@ -169,7 +180,7 @@ class AwgEditorPanel(ttk.Frame):
         self._entries: list[ttk.Entry] = []
         self._status: list[ttk.Label] = []
         for i in range(N_CHANNELS):
-            ttk.Label(grid, text=f"CH{i + 1}", style="Card.TLabel", foreground=CHANNEL_COLOURS[i],
+            ttk.Label(grid, text=f"CH{i + 1}", style="Card.TLabel", foreground=plot_style.series(i),
                       font=theme.mono(10, "bold")).grid(row=2 * i, column=0, sticky="w", padx=(0, 8))
             ttk.Combobox(grid, textvariable=self._ranges[i], values=list(_RANGES), state="readonly",
                          width=12, font=theme.mono(9)).grid(row=2 * i, column=1, sticky="w")
@@ -270,6 +281,7 @@ class AwgEditorPanel(ttk.Frame):
             return
         self._drawn = waveform
         self._figure.clear()
+        self._figure.set_facecolor(plot_style.PANEL)
         plot_awg(waveform, fig=self._figure, show_title=False)
         self._canvas.draw_idle()
 

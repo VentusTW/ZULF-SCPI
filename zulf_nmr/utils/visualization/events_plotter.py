@@ -18,23 +18,23 @@ from zulf_nmr.experiment.parser import Event, ExperimentConfig
 from zulf_nmr.utils.visualization import plot_style
 
 CATEGORIES = {
-    "Shim": ("SHIM", "#3b82f6"),
-    "Motor": ("MOTor", "#eab308"),
-    "Digital": ("DIGital", "#ec4899"),
-    "AWG": ("AWG", "#22c3e6"),
-    "Acquisition": ("ACQuire", "#f97316"),
-    "Sequence": ("SEQuence", "#22c55e"),
+    "Shim": "SHIM",
+    "Motor": "MOTor",
+    "Digital": "DIGital",
+    "AWG": "AWG",
+    "Acquisition": "ACQuire",
+    "Sequence": "SEQuence",
 }
-OTHER = ("Other", "#94a3b8")
+OTHER = "Other"
 
 
 def event_category(action: str) -> tuple[str, str]:
     """Return (category name, colour) from the root of the command header."""
     root = action.strip().lstrip(":").split(":", 1)[0].split(" ", 1)[0]
-    for name, (mnemonic, colour) in CATEGORIES.items():
+    for name, mnemonic in CATEGORIES.items():
         if mnemonic_matches(root, mnemonic):
-            return name, colour
-    return OTHER
+            return name, plot_style.CATEGORY_COLOURS[name]
+    return OTHER, plot_style.CATEGORY_COLOURS[OTHER]
 
 
 def load_events(source: ExperimentConfig | str | Path) -> tuple[str, list[Event]]:
@@ -49,9 +49,6 @@ def load_events(source: ExperimentConfig | str | Path) -> tuple[str, list[Event]
         data = json.load(f)
     events = [Event(int(e["time_ms"]), str(e["action"])) for e in data.get("events", [])]
     return data.get("experiment_name", path.stem), sorted(events, key=lambda e: e.time_ms)
-
-
-ACQUISITION_COLOUR = "#f97316"
 
 
 @dataclass(frozen=True)
@@ -113,10 +110,11 @@ def plot_events(
         ), y))
 
     if acquisition:
+        acquisition_colour = plot_style.CATEGORY_COLOURS["Acquisition"]
         y = 1
         width = acquisition.end_ms - acquisition.start_ms
-        ax.add_patch(Rectangle((acquisition.start_ms, y - 0.28), width, 0.56, facecolor=ACQUISITION_COLOUR,
-                               alpha=0.25, edgecolor=ACQUISITION_COLOUR, linewidth=1.0, zorder=2))
+        ax.add_patch(Rectangle((acquisition.start_ms, y - 0.28), width, 0.56, facecolor=acquisition_colour,
+                               alpha=0.25, edgecolor=acquisition_colour, linewidth=1.0, zorder=2))
         channels = ", ".join(map(str, acquisition.channels))
         ax.annotate(
             f"{acquisition.start_ms:g} – {acquisition.end_ms:g} ms", (acquisition.start_ms, y),
@@ -124,9 +122,9 @@ def plot_events(
         )
         side_labels.append((ax.annotate(
             f"Acquisition, CH {channels}", (1.01, y), xycoords=("axes fraction", "data"),
-            va="center", fontsize=8, family="monospace", color=ACQUISITION_COLOUR, fontweight="bold",
+            va="center", fontsize=8, family="monospace", color=acquisition_colour, fontweight="bold",
         ), y))
-        used.setdefault("Acquisition", ACQUISITION_COLOUR)
+        used.setdefault("Acquisition", acquisition_colour)
 
     ax.set_xlim(-0.03 * t_max, 1.12 * t_max)
     ax.set_ylim(0.3, n_rows + 0.7)

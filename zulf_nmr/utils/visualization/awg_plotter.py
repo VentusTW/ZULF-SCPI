@@ -10,10 +10,6 @@ from matplotlib.figure import Figure, SubFigure
 from zulf_nmr.hardware.awg import RANGE_FULL_SCALE_A, AwgRange, AwgWaveform, load_awg_npz
 from zulf_nmr.utils.visualization import plot_style
 
-CHANNEL_COLOURS = ("#22c3e6", "#f5b400", "#34d399", "#f472b6")
-
-
-ACQUISITION_COLOUR = "#f97316"
 _Y_MARGIN = 0.1
 
 
@@ -56,7 +52,9 @@ def plot_awg(
     if acquisition is not None:
         view_end = max(awg_end, min(acquisition[1], acquisition[0] + 0.25 * awg_end))
 
-    for ch, (ax, range_, colour) in enumerate(zip(axes, waveform.ranges, CHANNEL_COLOURS), start=1):
+    acquisition_colour = plot_style.CATEGORY_COLOURS["Acquisition"]
+    for ch, (ax, range_) in enumerate(zip(axes, waveform.ranges), start=1):
+        colour = plot_style.series(ch - 1)
         full_scale_mA = RANGE_FULL_SCALE_A[range_] * 1000
         values_mA = waveform.currents_A[:, ch - 1] * 1000
         ax.plot(t_ms, values_mA, color=colour, linewidth=1.4, solid_joinstyle="round", antialiased=True)
@@ -70,18 +68,18 @@ def plot_awg(
 
     if acquisition is not None:
         start, end, channels = acquisition
-        strip.broken_barh([(start, end - start)], (0.2, 0.6), facecolors=ACQUISITION_COLOUR, alpha=0.35,
-                          edgecolors=ACQUISITION_COLOUR, linewidth=1.0)
+        strip.broken_barh([(start, end - start)], (0.2, 0.6), facecolors=acquisition_colour, alpha=0.35,
+                          edgecolors=acquisition_colour, linewidth=1.0)
         strip.set_ylim(0, 1)
         strip.set_yticks([])
         strip.tick_params(axis="x", bottom=False)
         for side in ("top", "right", "left"):
             strip.spines[side].set_visible(False)
         strip.set_title(f"Acquisition CH {', '.join(map(str, channels))}: {start:g} – {end:g} ms",
-                        loc="left", fontsize=8, color=ACQUISITION_COLOUR, fontweight="bold", pad=2)
+                        loc="left", fontsize=8, color=acquisition_colour, fontweight="bold", pad=2)
         for ax in axes:
-            ax.axvline(start, color=ACQUISITION_COLOUR, linewidth=1.0, linestyle="--", zorder=1)
-            ax.axvline(end, color=ACQUISITION_COLOUR, linewidth=1.0, linestyle="--", zorder=1)
+            ax.axvline(start, color=acquisition_colour, linewidth=1.0, linestyle="--", zorder=1)
+            ax.axvline(end, color=acquisition_colour, linewidth=1.0, linestyle="--", zorder=1)
     axes[-1].set_xlim(-0.02 * view_end, view_end * 1.02)
     axes[-1].set_xlabel("Time after :AWG:RUN (ms)", fontweight="bold")
     name = waveform.source_path.name if waveform.source_path else "AWG sequence"

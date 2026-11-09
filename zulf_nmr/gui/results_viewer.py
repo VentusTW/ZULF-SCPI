@@ -28,8 +28,6 @@ from zulf_nmr.utils.visualization.results_plotter import (
 
 ROW_SIZE_IN = (11.0, 3.6)
 LIVE_AVERAGE_INTERVAL_S = 1.0
-SELECTION_COLOUR = "#94a3b8"
-CURSOR_COLOUR = "#f87171"
 EDGE_GRAB_PX = 10
 ZOOM_STEP = 1.25
 PAN_STEP = 0.2
@@ -114,7 +112,7 @@ class TraceRow:
         self._name.pack(side="left", padx=6)
         self._name.bind("<Button-1>", lambda _e: self.toggle())
         self._readout = ttk.Label(self.frame, text="", style="Card.TLabel", font=theme.mono(9),
-                                  foreground=CURSOR_COLOUR)
+                                  foreground=theme.CURSOR)
         for w in (self._header, self._toggle, self._name, self._readout):
             w.bind("<MouseWheel>", lambda e: self.on_scroll and self.on_scroll(e.delta / 120))
 
@@ -167,6 +165,21 @@ class TraceRow:
         self.toolbar.destroy()
         self.widget.destroy()
         self.figure = self.canvas = self.widget = self.toolbar = self.selector = None
+
+    def restyle(self) -> None:
+        """Make the plots again in the colours of the current theme; the zoom and the
+        selected range stay, the measuring cursors are turned off."""
+        if self.figure is None:
+            return
+        if self.cursors_on:
+            self.set_cursors(False)
+        expanded = self.expanded
+        self._readout.pack_forget()
+        self._drop_plots()
+        self.expanded = False
+        self._toggle.config(text="+")
+        if expanded:
+            self.expand(True)
 
     def set_size(self, width: int, height: int) -> None:
         """Size of the plots in pixels (the figure follows its widget)."""
@@ -277,7 +290,7 @@ class TraceRow:
         self.selector = SpanSelector(
             self.ax_time, self._on_select, "horizontal", useblit=True, interactive=True,
             drag_from_anywhere=True, button=1, grab_range=EDGE_GRAB_PX,
-            props=dict(facecolor=SELECTION_COLOUR, alpha=0.25),
+            props=dict(facecolor=theme.SPAN, alpha=0.25),
         )
         if self.t_range is not None:
             self.selector.extents = self.t_range
@@ -505,10 +518,10 @@ class TraceRow:
         for name, x in zip("AB", self._cursor_x[plot]):
             if x is None:
                 continue
-            line = ax.axvline(x, color=CURSOR_COLOUR, linewidth=1.0, linestyle="-" if name == "A" else "--",
+            line = ax.axvline(x, color=theme.CURSOR, linewidth=1.0, linestyle="-" if name == "A" else "--",
                               animated=animated)
             label = ax.annotate(name, (x, 1.0), xycoords=("data", "axes fraction"), xytext=(3, -3),
-                                textcoords="offset points", va="top", fontsize=8, color=CURSOR_COLOUR,
+                                textcoords="offset points", va="top", fontsize=8, color=theme.CURSOR,
                                 fontweight="bold", annotation_clip=True, animated=animated)
             line.set_gid("cursor")
             label.set_gid("cursor")
@@ -609,7 +622,7 @@ class EdgeDialog(tk.Toplevel):
         self.bind("<Escape>", lambda _e: self.destroy())
         x, y = self.winfo_pointerxy()
         self.geometry(f"+{x + 12}+{y + 12}")
-        theme.dark_title_bar(self)
+        theme.title_bar(self)
         entry.focus_set()
         entry.select_range(0, "end")
         self.grab_set()
@@ -654,8 +667,6 @@ class ResultsView(ttk.Frame):
                   font=theme.mono(9)).pack(side="left", padx=(6, 16))
         ttk.Button(bottom.body, text="Close tab", style="Small.TButton",
                    command=on_close or self.destroy).pack(side="right")
-        self._progress = ttk.Progressbar(bottom.body, mode="determinate", length=220)
-        self._progress.pack(side="right", padx=(8, 12))
         self._progress_text = ttk.Label(bottom.body, text="", style="Card.TLabel", foreground=theme.MUTED,
                                         font=theme.mono(9))
         self._progress_text.pack(side="right")
@@ -679,6 +690,10 @@ class ResultsView(ttk.Frame):
         self._rows: dict[tuple[int, int], TraceRow] = {}
         self._complete: dict[int, tuple[np.ndarray, int]] = {}
         self._average_drawn: dict[int, float] = {}
+
+    def restyle(self) -> None:
+        for row in (*self._rows.values(), *self._averages.values()):
+            row.restyle()
 
     def show_live(self, group: ResultGroup, number: int, data: np.ndarray, total_samples: int) -> None:
         """Draw a transient that is still being acquired (data = samples received so far)
@@ -738,10 +753,9 @@ class ResultsView(ttk.Frame):
                                f"{group.average_file.name}")
         self.update_idletasks()
         self._view.yview_moveto(0.0)
-        self.set_progress(1, 1, f"Loaded {len(result.groups)} set(s), {n_transients} transient(s)")
+        self.set_status(f"Loaded {len(result.groups)} set(s), {n_transients} transient(s)")
 
-    def set_progress(self, value: float, maximum: float, text: str) -> None:
-        self._progress.config(maximum=maximum, value=value)
+    def set_status(self, text: str) -> None:
         self._progress_text.config(text=text)
 
     def _row(self, group: ResultGroup, number: int, total_samples: int, expanded: bool = True) -> TraceRow:
@@ -842,6 +856,10 @@ class ResultsPanel(ttk.Frame):
         self._tabs.select(view)
         self._update()
         return view
+
+    def restyle(self) -> None:
+        for view in self._views:
+            view.restyle()
 
     def rename(self, view: ResultsView, title: str) -> None:
         if view in self._views:
