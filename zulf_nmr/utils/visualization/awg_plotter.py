@@ -8,11 +8,12 @@ from pathlib import Path
 from matplotlib.figure import Figure, SubFigure
 
 from zulf_nmr.hardware.awg import RANGE_FULL_SCALE_A, AwgRange, AwgWaveform, load_awg_npz
+from zulf_nmr.utils.visualization import plot_style
 
-CHANNEL_COLOURS = ("#0072B2", "#E69F00", "#009E73", "#CC79A7")
+CHANNEL_COLOURS = ("#22c3e6", "#f5b400", "#34d399", "#f472b6")
 
 
-ACQUISITION_COLOUR = "#D55E00"
+ACQUISITION_COLOUR = "#f97316"
 _Y_MARGIN = 0.1
 
 
@@ -30,13 +31,15 @@ def plot_awg(
     waveform: AwgWaveform,
     fig: Figure | SubFigure | None = None,
     acquisition: tuple[float, float, tuple[int, ...]] | None = None,
+    show_title: bool = True,
 ) -> Figure | SubFigure:
     """Draw one row per AWG channel: current in mA versus time in ms after :AWG:RUN.
 
     The y range of every row fits its values. acquisition = (start_ms, end_ms, ADC
     channels) is drawn as a bar in a strip above the channels and as dashed lines at
     its start and end; the time axis shows the whole waveform and the start of the
-    acquisition (zoom out to see a longer acquisition to its end).
+    acquisition (zoom out to see a longer acquisition to its end). show_title=False
+    leaves out the title (for a panel that shows it itself).
     """
     if fig is None:
         import matplotlib.pyplot as plt
@@ -57,7 +60,7 @@ def plot_awg(
         full_scale_mA = RANGE_FULL_SCALE_A[range_] * 1000
         values_mA = waveform.currents_A[:, ch - 1] * 1000
         ax.plot(t_ms, values_mA, color=colour, linewidth=1.4, solid_joinstyle="round", antialiased=True)
-        ax.axhline(0, color="#D0D0D0", linewidth=0.8, zorder=0)
+        ax.axhline(0, color=plot_style.GUIDE, linewidth=0.8, zorder=0)
         ax.set_ylim(*_y_range(values_mA, full_scale_mA))
         range_name = "LOW" if range_ == AwgRange.LOW else "HIGH"
         ax.set_ylabel(f"CH{ch} (mA)\n{range_name} ±{full_scale_mA:g}", fontsize=9)
@@ -82,11 +85,12 @@ def plot_awg(
     axes[-1].set_xlim(-0.02 * view_end, view_end * 1.02)
     axes[-1].set_xlabel("Time after :AWG:RUN (ms)", fontweight="bold")
     name = waveform.source_path.name if waveform.source_path else "AWG sequence"
-    fig.suptitle(
-        f"AWG sequence — {name}  ({waveform.n_samples} samples, "
-        f"{waveform.sample_rate_hz:g} Hz, {waveform.duration_s * 1000:g} ms)",
-        fontweight="bold",
-    )
+    if show_title:
+        fig.suptitle(
+            f"AWG sequence — {name}  ({waveform.n_samples} samples, "
+            f"{waveform.sample_rate_hz:g} Hz, {waveform.duration_s * 1000:g} ms)",
+            fontweight="bold",
+        )
     if isinstance(fig, Figure) and fig.get_layout_engine() is None:
         fig.tight_layout()
     return fig
@@ -97,6 +101,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("file", type=Path)
     parser.add_argument("-o", "--output", type=Path, help="save to file instead of showing a window")
     args = parser.parse_args(argv)
+    plot_style.apply()
     fig = plot_awg(load_awg_npz(args.file))
     if args.output:
         fig.savefig(args.output, dpi=150, bbox_inches="tight")

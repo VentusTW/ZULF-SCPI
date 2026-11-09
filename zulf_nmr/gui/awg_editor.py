@@ -1,4 +1,4 @@
-"""Window for writing an AWG sequence (.npz) from formulas, with a calculator keypad."""
+"""AWG editor panel: an AWG sequence (.npz) written as formulas, with a calculator keypad."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
 import numpy as np
@@ -21,12 +21,11 @@ from zulf_nmr.hardware.awg_formula import (
     open_for_editing,
     save_waveform,
 )
-from zulf_nmr.gui import user_settings
+from zulf_nmr.gui import theme, user_settings
 from zulf_nmr.gui.formula_hint import GhostText
 from zulf_nmr.gui.tooltip import Tooltip
-from zulf_nmr.utils.visualization.awg_plotter import plot_awg
+from zulf_nmr.utils.visualization.awg_plotter import CHANNEL_COLOURS, plot_awg
 
-_COLOR_ERROR = "#d0342c"
 PREVIEW_DELAY_MS = 150
 _RANGES = {"HIGH (1 A)": AwgRange.HIGH, "LOW (10 mA)": AwgRange.LOW}
 _SETTINGS = "awg_editor"
@@ -82,7 +81,7 @@ _EXAMPLES = ("200*pulse(5ms, 15ms)", "5*sin(2*pi*300Hz*t)*exp(-t/15ms)",
              "500*ramp(40ms, 45ms) - 500*ramp(65ms, 70ms)", "300*chirp(100Hz, 800Hz, 10ms, 60ms)")
 
 
-class AwgEditor(tk.Toplevel):
+class AwgEditorPanel(ttk.Frame):
     """Formulas for the 4 AWG channels, a live preview and Save as .npz.
 
     The file is written only when the user presses Save and every channel is valid;
@@ -91,9 +90,7 @@ class AwgEditor(tk.Toplevel):
 
     def __init__(self, parent: tk.Misc, initial_dir: Path, max_sample_rate_hz: float,
                  max_amplitude_A: float, on_saved=None) -> None:
-        super().__init__(parent)
-        self.title("AWG sequence editor")
-        self.geometry(f"{min(1250, self.winfo_screenwidth() - 80)}x{min(900, self.winfo_screenheight() - 100)}+60+30")
+        super().__init__(parent, padding=(18, 16, 18, 16))
         self._initial_dir = initial_dir
         self._max_rate = max_sample_rate_hz
         self._max_amp = max_amplitude_A
@@ -126,62 +123,68 @@ class AwgEditor(tk.Toplevel):
         self._update()
 
     def destroy(self) -> None:
-        """Close - also when the main window closes - remembering what was typed."""
+        """Closed with the main window: remember what was typed."""
+        self.save_settings()
+        super().destroy()
+
+    def save_settings(self) -> None:
         user_settings.save_section(_SETTINGS, {
             "sample_rate_hz": self._rate.get(),
             "duration_ms": self._duration.get(),
             "ranges": [r.get() for r in self._ranges],
             "formulas": [f.get() for f in self._formulas],
         })
-        super().destroy()
 
     def _build_ui(self) -> None:
-        bottom = ttk.Frame(self, padding=8)
-        bottom.pack(side="bottom", fill="x")
-        ttk.Button(bottom, text="Open…", command=self._open).pack(side="left")
-        ttk.Button(bottom, text="Fit formulas", command=self._fit).pack(side="left", padx=(6, 0))
-        self._source_label = ttk.Label(bottom, text="", foreground="#666666")
-        self._source_label.pack(side="left", padx=(8, 0))
-        self._summary = ttk.Label(bottom, text="")
-        self._summary.pack(side="left", padx=12)
-        ttk.Button(bottom, text="Close", command=self.destroy).pack(side="right")
-        ttk.Button(bottom, text="Save…", command=self._save).pack(side="right", padx=(0, 6))
+        head = theme.card(self, padding=12)
+        head.pack(side="top", fill="x")
+        theme.heading(head.body, "AWG generator").pack(side="left")
+        self._summary = theme.Badge(head.body, "", theme.MUTED)
+        self._summary.pack(side="left", padx=10)
+        ttk.Button(head.body, text="Save…", style="Accent.TButton", command=self._save).pack(side="right")
+        ttk.Button(head.body, text="Fit formulas", command=self._fit).pack(side="right", padx=(0, 6))
+        ttk.Button(head.body, text="Open…", command=self._open).pack(side="right", padx=(0, 6))
+        self._source_label = ttk.Label(head.body, text="", style="Card.TLabel", foreground=theme.MUTED,
+                                       font=theme.mono(9))
+        self._source_label.pack(side="right", padx=(0, 12))
 
-        top = ttk.Frame(self, padding=(8, 8, 8, 0))
-        top.pack(side="top", fill="x")
+        top_card = theme.card(self, padding=12)
+        top_card.pack(side="top", fill="x", pady=(12, 0))
+        top = top_card.body
 
-        left = ttk.Frame(top)
+        left = ttk.Frame(top, style="Card.TFrame")
         left.pack(side="left", fill="both", expand=True)
-        params = ttk.Frame(left)
+        params = ttk.Frame(left, style="Card.TFrame")
         params.pack(side="top", fill="x")
-        ttk.Label(params, text="Sample rate (Hz):").pack(side="left")
-        ttk.Entry(params, textvariable=self._rate, width=10).pack(side="left", padx=(4, 16))
-        ttk.Label(params, text="Duration (ms):").pack(side="left")
-        ttk.Entry(params, textvariable=self._duration, width=10).pack(side="left", padx=(4, 16))
-        self._general = ttk.Label(params, text="")
+        theme.caption(params, "Sample rate (Hz)").pack(side="left")
+        ttk.Entry(params, textvariable=self._rate, width=10, font=theme.mono(10)).pack(side="left", padx=(6, 18))
+        theme.caption(params, "Duration (ms)").pack(side="left")
+        ttk.Entry(params, textvariable=self._duration, width=10, font=theme.mono(10)).pack(side="left", padx=(6, 18))
+        self._general = ttk.Label(params, text="", style="Card.TLabel", font=theme.mono(9))
         self._general.pack(side="left")
 
-        grid = ttk.Frame(left)
-        grid.pack(side="top", fill="x", pady=8)
+        grid = ttk.Frame(left, style="Card.TFrame")
+        grid.pack(side="top", fill="x", pady=(12, 0))
         grid.columnconfigure(2, weight=1)
         self._entries: list[ttk.Entry] = []
         self._status: list[ttk.Label] = []
         for i in range(N_CHANNELS):
-            ttk.Label(grid, text=f"CH{i + 1}").grid(row=2 * i, column=0, sticky="w", padx=(0, 6))
+            ttk.Label(grid, text=f"CH{i + 1}", style="Card.TLabel", foreground=CHANNEL_COLOURS[i],
+                      font=theme.mono(10, "bold")).grid(row=2 * i, column=0, sticky="w", padx=(0, 8))
             ttk.Combobox(grid, textvariable=self._ranges[i], values=list(_RANGES), state="readonly",
-                         width=12).grid(row=2 * i, column=1, sticky="w")
-            entry = ttk.Entry(grid, textvariable=self._formulas[i], font=("Consolas", 10))
+                         width=12, font=theme.mono(9)).grid(row=2 * i, column=1, sticky="w")
+            entry = ttk.Entry(grid, textvariable=self._formulas[i], font=theme.mono(10))
             entry.grid(row=2 * i, column=2, sticky="ew", padx=6)
             entry.bind("<FocusIn>", lambda _e, w=entry: setattr(self, "_active", w))
             self._entries.append(entry)
             ghost = GhostText(entry, f"e.g. {_EXAMPLES[i]}")
             self._formulas[i].trace_add("write", lambda *_, g=ghost: self.after_idle(g.update))
-            status = ttk.Label(grid, text="", foreground="#666666")
+            status = ttk.Label(grid, text="", style="Card.TLabel", foreground=theme.MUTED, font=theme.mono(8))
             status.grid(row=2 * i + 1, column=2, sticky="w", padx=6, pady=(0, 4))
             self._status.append(status)
 
-        keypad = ttk.Frame(top)
-        keypad.pack(side="right", anchor="n", padx=(12, 0))
+        keypad = ttk.Frame(top, style="Card.TFrame")
+        keypad.pack(side="right", anchor="n", padx=(16, 0))
         for g, (title, rows) in enumerate(_KEYPAD):
             group = ttk.LabelFrame(keypad, text=title, padding=4)
             group.grid(row=0, column=g, sticky="ns", padx=(0 if g == 0 else 6, 0))
@@ -190,14 +193,21 @@ class AwgEditor(tk.Toplevel):
                     if not key:
                         continue
                     button = ttk.Button(group, text=_KEY_LABELS.get(key, key), width=6, takefocus=False,
-                                        command=lambda k=key: self._key(k))
+                                        style="Key.TButton", command=lambda k=key: self._key(k))
                     button.grid(row=r, column=c, padx=1, pady=1)
                     if key in _KEY_NAMES:
                         Tooltip(button, _KEY_NAMES[key])
 
+        preview = theme.card(self, padding=12)
+        preview.pack(side="top", fill="both", expand=True, pady=(12, 0))
+        theme.caption(preview.body, "Preview - current in mA versus time after :AWG:RUN").pack(side="top", anchor="w")
         self._figure = Figure(figsize=(11, 6), layout="constrained")
-        self._canvas = FigureCanvasTkAgg(self._figure, master=self)
-        self._canvas.get_tk_widget().pack(side="top", fill="both", expand=True, padx=8, pady=8)
+        self._canvas = FigureCanvasTkAgg(self._figure, master=preview.body)
+        toolbar = NavigationToolbar2Tk(self._canvas, preview.body, pack_toolbar=False)
+        toolbar.update()
+        theme.style_toolbar(toolbar)
+        toolbar.pack(side="bottom", fill="x")
+        theme.figure_widget(self._canvas).pack(side="top", fill="both", expand=True, pady=(6, 0))
 
     def _key(self, key: str) -> None:
         entry = self._active
@@ -233,26 +243,25 @@ class AwgEditor(tk.Toplevel):
     def _show(self, errors: list[str], channel_errors: list[str | None], waveform: AwgWaveform | None) -> None:
         self._errors = errors + [f"CH{i + 1}: {e}" for i, e in enumerate(channel_errors) if e]
         self._waveform = waveform if not self._errors else None
-        self._general.config(text="; ".join(errors), foreground=_COLOR_ERROR)
+        self._general.config(text="; ".join(errors), foreground=theme.DANGER)
         for i, label in enumerate(self._status):
             if channel_errors[i]:
-                label.config(text=channel_errors[i], foreground=_COLOR_ERROR)
+                label.config(text=channel_errors[i], foreground=theme.DANGER)
             elif waveform is not None:
                 peak = abs(waveform.currents_A[:, i]).max() * 1000
                 label.config(text=f"OK, peak {peak:.4g} mA" if self._formulas[i].get().strip() else "0 mA (empty)",
-                             foreground="#2e9e44" if self._formulas[i].get().strip() else "#666666")
+                             foreground=theme.OK if self._formulas[i].get().strip() else theme.MUTED)
             else:
                 label.config(text="")
         if not self._errors:
-            self._summary.config(
-                text=f"{waveform.n_samples} samples, {waveform.sample_rate_hz:g} Hz, {waveform.duration_s * 1000:g} ms",
-                foreground="")
+            self._summary.set(
+                f"{waveform.n_samples} samples / {waveform.sample_rate_hz:g} Hz / {waveform.duration_s * 1000:g} ms",
+                theme.ACCENT)
             if self._pending_preview is not None:
                 self.after_cancel(self._pending_preview)
             self._pending_preview = self.after(PREVIEW_DELAY_MS, self._draw_preview)
         else:
-            self._summary.config(text="fix the errors - the preview shows the last valid version",
-                                 foreground=_COLOR_ERROR)
+            self._summary.set("fix the errors - the preview shows the last valid version", theme.DANGER)
 
     def _draw_preview(self) -> None:
         self._pending_preview = None
@@ -261,7 +270,7 @@ class AwgEditor(tk.Toplevel):
             return
         self._drawn = waveform
         self._figure.clear()
-        plot_awg(waveform, fig=self._figure)
+        plot_awg(waveform, fig=self._figure, show_title=False)
         self._canvas.draw_idle()
 
     def _save(self) -> None:

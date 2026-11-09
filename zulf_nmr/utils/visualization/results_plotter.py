@@ -10,9 +10,10 @@ from __future__ import annotations
 import numpy as np
 from matplotlib.axes import Axes
 
-CHANNEL_COLOURS = {1: "#0072B2", 2: "#E69F00", 3: "#009E73", 4: "#CC79A7",
-                   5: "#D55E00", 6: "#56B4E9", 7: "#000000", 8: "#7F7F7F"}
-AVERAGE_BACKGROUND = "#FFF6EE"
+from zulf_nmr.utils.visualization import plot_style
+
+CHANNEL_COLOURS = dict(enumerate(plot_style.SERIES, start=1))
+AVERAGE_BACKGROUND = "#15151f"
 _MAX_POINTS = 200000
 _SMOOTH_FACTOR = 8
 _DENSE = 4
@@ -34,7 +35,7 @@ def smooth_for_display(data: np.ndarray, sample_rate_hz: float) -> tuple[np.ndar
 
 
 def channel_colour(channel: int) -> str:
-    return CHANNEL_COLOURS.get(channel, "#7F7F7F")
+    return CHANNEL_COLOURS.get(channel, plot_style.MUTED)
 
 
 def spectrum(data: np.ndarray, sample_rate_hz: float) -> tuple[np.ndarray, np.ndarray]:
@@ -153,7 +154,7 @@ def setup_time_axes(ax: Axes, channels: tuple[int, ...], average: bool, start_s:
     """
     curves = Curves(ax, channels, linewidth=1.0)
     if start_s > 0:
-        ax.axvline(start_s, color="#999999", linewidth=0.8, linestyle="--")
+        ax.axvline(start_s, color=plot_style.MUTED, linewidth=0.8, linestyle="--")
     ax.set_xlabel("Time from the start of the sequence (s)", fontsize=8)
     ax.set_ylabel("Signal", fontsize=8)
     _style(ax, average)

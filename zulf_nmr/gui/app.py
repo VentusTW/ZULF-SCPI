@@ -1,4 +1,6 @@
-"""Main window: connection indicator, SCPI console, experiment queue and its run."""
+"""Main window: a top bar with the connection and run state, a navigation between the
+instrument consoles (terminal, queue, set review, results, AWG generator, system) and
+the logic that ties them together - connection, queue review, run and results."""
 
 from __future__ import annotations
 
@@ -10,20 +12,18 @@ import threading
 import time
 import tkinter as tk
 from dataclasses import asdict
-from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from tkinter.scrolledtext import ScrolledText
-from typing import Any
+from typing import Any, Callable
 
 import numpy as np
-from matplotlib.figure import Figure
+from PIL import Image, ImageTk
 from serial.tools import list_ports
 
 from zulf_nmr.core.connection import APP_DIR, DEFAULT_SYSTEM_CONFIG, Message, SCPIConnection
 from zulf_nmr.core.errors import english_error
-from zulf_nmr.core.scpi import header_matches
 from zulf_nmr.core.spectrometer import Spectrometer
+from zulf_nmr.experiment.history import HistoryError, load_results
 from zulf_nmr.experiment.parser import (
     ConfigError,
     ConnectionSettings,
@@ -31,24 +31,16 @@ from zulf_nmr.experiment.parser import (
     SystemConfig,
     load_system_config,
 )
-from zulf_nmr.experiment.history import HistoryError, load_results
 from zulf_nmr.experiment.runner import ExperimentAborted
-from zulf_nmr.experiment.sequence import acquisition_window_ms
-from zulf_nmr.experiment.schedule import (
-    QueueItem,
-    QueueResult,
-    QueueRunner,
-    ResultGroup,
-    Transient,
-    format_delay,
-)
-from zulf_nmr.gui import user_settings
-from zulf_nmr.gui.awg_editor import AwgEditor
-from zulf_nmr.gui.preview import PlotPreview
-from zulf_nmr.gui.queue_editor import QueueEditor
-from zulf_nmr.gui.results_viewer import ResultsViewer
-from zulf_nmr.utils.visualization.awg_plotter import plot_awg
-from zulf_nmr.utils.visualization.events_plotter import AcquisitionWindow, plot_events
+from zulf_nmr.experiment.schedule import QueueItem, QueueResult, QueueRunner, ResultGroup, Transient
+from zulf_nmr.gui import theme, user_settings
+from zulf_nmr.gui.awg_editor import AwgEditorPanel
+from zulf_nmr.gui.console_panel import MAX_SAVED_HISTORY, ConsolePanel
+from zulf_nmr.gui.queue_editor import QueuePanel
+from zulf_nmr.gui.results_viewer import ResultsPanel, ResultsView
+from zulf_nmr.gui.review import ReviewPanel
+from zulf_nmr.gui.system_panel import SystemPanel
+from zulf_nmr.gui.tooltip import Tooltip
 from zulf_nmr.version import version_text
 
 log = logging.getLogger(__name__)
@@ -64,13 +56,19 @@ ICON_DIR = Path(__file__).resolve().parent / "assets"
 _STATUS_POLL_MS = 500
 _LOG_POLL_MS = 100
 _DRAIN_BUDGET_S = 0.05
-_MAX_CONSOLE_LINES = 5000
 _CLOSE_WAIT_S = 5.0
-_MAX_LOG_LINE = 300
-_COLOR_OK = "#2e9e44"
-_COLOR_FAIL = "#d0342c"
 _SETTINGS = "main_window"
-_MAX_SAVED_HISTORY = 100
+_LOGO_PX = 34
+_SIDEBAR_PX = 250
+
+PANELS = (
+    ("console", "Terminal & SCPI", "›_"),
+    ("queue", "Experiment queue", "≡"),
+    ("review", "Set review", "✓"),
+    ("results", "Results", "▤"),
+    ("awg", "AWG generator", "≈"),
+    ("system", "System", "⚙"),
+)
 
 
 def load_system_settings(path: Path = DEFAULT_SYSTEM_CONFIG) -> tuple[SystemConfig, str]:
@@ -85,13 +83,59 @@ def load_system_settings(path: Path = DEFAULT_SYSTEM_CONFIG) -> tuple[SystemConf
         return DEFAULT_SYSTEM, f"No valid {path} ({reason}) - using default values"
 
 
+class NavItem(tk.Frame):
+    """One entry of the sidebar: an accent bar when active, an icon, a name and a badge."""
+
+    def __init__(self, parent: tk.Misc, text: str, icon: str, shortcut: str, command: Callable[[], None]) -> None:
+        super().__init__(parent, background=theme.SURFACE, cursor="hand2")
+        self._bar = tk.Frame(self, width=3, background=theme.SURFACE)
+        self._bar.pack(side="left", fill="y")
+        self._icon = tk.Label(self, text=icon, width=3, font=theme.mono(11, "bold"), anchor="center")
+        self._icon.pack(side="left", padx=(10, 4), pady=9)
+        self._text = tk.Label(self, text=text, font=theme.sans(11), anchor="w")
+        self._text.pack(side="left", fill="x", expand=True)
+        self._badge = tk.Label(self, text="", font=theme.mono(8, "bold"), padx=6)
+        self._badge.pack(side="right", padx=(0, 12))
+        self._active = self._hover = False
+        self._badge_colour = theme.MUTED
+        for widget in (self, self._icon, self._text, self._badge):
+            widget.bind("<Button-1>", lambda _e: command())
+            widget.bind("<Enter>", lambda _e: self._set_hover(True))
+            widget.bind("<Leave>", lambda _e: self._set_hover(False))
+        Tooltip(self, f"{text}  ({shortcut})")
+        self._paint()
+
+    def set_active(self, active: bool) -> None:
+        self._active = active
+        self._paint()
+
+    def set_badge(self, text: str, colour: str = theme.MUTED) -> None:
+        self._badge_colour = colour
+        self._badge.config(text=text.upper())
+        self._paint()
+
+    def _set_hover(self, hover: bool) -> None:
+        self._hover = hover
+        self._paint()
+
+    def _paint(self) -> None:
+        background = theme.PANEL if self._active else theme.RAISED if self._hover else theme.SURFACE
+        for widget in (self, self._icon, self._text, self._badge):
+            widget.config(background=background)
+        self._bar.config(background=theme.ACCENT if self._active else background)
+        self._icon.config(foreground=theme.ACCENT if self._active else theme.MUTED)
+        self._text.config(foreground=theme.TEXT if self._active or self._hover else "#c3cede")
+        self._badge.config(foreground=self._badge_colour)
+
+
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
+        theme.apply_theme(self)
         self.title(f"ZULF-SCPI {version_text()}")
         self._set_icon()
-        self.geometry("820x560")
-        self.minsize(640, 400)
+        self.geometry("1280x820")
+        self.minsize(1040, 660)
         self._maximize()
 
         self._incoming: queue.Queue[tuple[str, Any]] = queue.Queue()
@@ -102,22 +146,31 @@ class App(tk.Tk):
 
         self._queue: list[QueueItem] = []
         self._queue_accepted = False
+        self._review_items: list[QueueItem] | None = None
+        self._review_index = 0
         self._runner: QueueRunner | None = None
         self._worker: threading.Thread | None = None
-        self._viewer: ResultsViewer | None = None
+        self._viewer: ResultsView | None = None
         self._transients_done = 0
+        self._progress_text = ""
 
-        self._system, source = load_system_settings()
+        self._system, self._system_note = load_system_settings()
         self._settings = self._system.connection
 
+        self._panels: dict[str, ttk.Frame | None] = {}
+        self._current: str | None = None
         self._build_ui()
-        self._log("info", source)
+        theme.dark_title_bar(self)
+        self._log("info", f"ZULF-SCPI {version_text()}")
+        self._log("info", self._system_note)
         self._apply_settings_to_fields(self._settings)
         self._restore_typed()
         try:
             self._ensure_results_dir()
         except OSError:
             pass
+        self._system_panel.show(self._system, self._system_note)
+        self._set_queue([], accepted=False)
         self._connect()
 
         self.after(_STATUS_POLL_MS, self._poll_status)
@@ -125,110 +178,185 @@ class App(tk.Tk):
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self) -> None:
-        top = ttk.Frame(self, padding=8)
-        top.pack(fill="x")
+        self.columnconfigure(1, weight=1)
+        self.rowconfigure(2, weight=1)
 
-        self._status_icon = tk.Canvas(top, width=18, height=18, highlightthickness=0)
-        self._status_dot = self._status_icon.create_oval(2, 2, 16, 16, fill=_COLOR_FAIL, outline="")
-        self._status_icon.pack(side="left")
-        self._status_label = ttk.Label(top, text="Disconnected", width=14)
-        self._status_label.pack(side="left", padx=(6, 12))
+        self._build_top_bar().grid(row=0, column=0, columnspan=2, sticky="ew")
+        tk.Frame(self, height=1, background=theme.BORDER).grid(row=1, column=0, columnspan=2, sticky="ew")
+        self._build_sidebar().grid(row=2, column=0, sticky="ns")
+        self._content = ttk.Frame(self)
+        self._content.grid(row=2, column=1, sticky="nsew")
+        tk.Frame(self, height=1, background=theme.BORDER).grid(row=3, column=0, columnspan=2, sticky="ew")
+        self._build_status_bar().grid(row=4, column=0, columnspan=2, sticky="ew")
 
-        ttk.Label(top, text="Port:").pack(side="left")
-        self._port = ttk.Combobox(top, width=12, values=self._available_ports())
-        self._port.pack(side="left", padx=(4, 8))
-        ttk.Label(top, text="Baud:").pack(side="left")
-        self._baud = ttk.Entry(top, width=8)
-        self._baud.pack(side="left", padx=(4, 8))
-        self._port.bind("<<ComboboxSelected>>", lambda _e: self._connect())
-        self._port.bind("<Return>", lambda _e: self._connect())
-        self._baud.bind("<Return>", lambda _e: self._connect())
+        self._console = ConsolePanel(self._content, ports=self._available_ports, on_send=self._send,
+                                     on_connect=self._connect, on_toggle_connection=self._toggle_connection,
+                                     on_load_connection=self._load_connection_file)
+        self._queue_panel = QueuePanel(self._content, self._system.hardware_limits,
+                                       initial_dir=DEFAULT_SYSTEM_CONFIG.parent.parent / "data",
+                                       on_review=self._start_review, on_changed=self._queue_edited)
+        self._review = ReviewPanel(self._content, on_ok=self._review_ok, on_exit=self._review_exit,
+                                   on_run=self._start_run, on_abort=self._abort,
+                                   on_queue=lambda: self.show_panel("queue"))
+        self._results = ResultsPanel(self._content, on_load=self._load_results)
+        self._system_panel = SystemPanel(self._content, results_dir=self._results_dir,
+                                         on_load_connection=self._load_connection_file)
+        self._panels = {"console": self._console, "queue": self._queue_panel, "review": self._review,
+                        "results": self._results, "awg": None, "system": self._system_panel}
+        for number, (name, _text, _icon) in enumerate(PANELS, start=1):
+            self.bind_all(f"<Control-Key-{number}>", lambda _e, n=name: self.show_panel(n))
+        self.show_panel("console")
+        self._console.command.focus_set()
 
-        self._connect_btn = ttk.Button(top, text="Connect", command=self._toggle_connection)
-        self._connect_btn.pack(side="left")
+    def _build_top_bar(self) -> ttk.Frame:
+        bar = ttk.Frame(self, style="Surface.TFrame", padding=(14, 8, 14, 8))
+        try:
+            image = Image.open(ICON_DIR / "icon.png").convert("RGBA").resize((_LOGO_PX, _LOGO_PX), Image.LANCZOS)
+            self._logo = ImageTk.PhotoImage(image, master=self)
+            ttk.Label(bar, image=self._logo, style="Surface.TLabel").pack(side="left")
+        except OSError:
+            log.warning("Logo not found in %s", ICON_DIR)
+        name = ttk.Frame(bar, style="Surface.TFrame")
+        name.pack(side="left", padx=(10, 18))
+        ttk.Label(name, text="ZULF-SCPI", style="Surface.TLabel", foreground=theme.ACCENT,
+                  font=theme.mono(12, "bold")).pack(anchor="w")
+        ttk.Label(name, text=f"v{version_text()}", style="Surface.TLabel", foreground=theme.MUTED,
+                  font=theme.mono(8)).pack(anchor="w")
+        tk.Frame(bar, width=1, background=theme.BORDER).pack(side="left", fill="y", padx=(0, 16))
 
-        ttk.Button(top, text="Load config", command=self._load_config_file).pack(
-            side="right"
-        )
-        ttk.Button(top, text="Load connection", command=self._load_connection_file).pack(
-            side="right", padx=(0, 6)
-        )
-        ttk.Button(top, text="Load results", command=self._load_results).pack(side="right", padx=(0, 6))
-        ttk.Button(top, text="AWG editor", command=self._open_awg_editor).pack(side="right", padx=(0, 6))
+        chip = tk.Frame(bar, background=theme.FIELD, highlightthickness=1, highlightbackground=theme.BORDER)
+        chip.pack(side="left")
+        self._link_dot = theme.StatusDot(chip, theme.FIELD, size=9)
+        self._link_dot.pack(side="left", padx=(10, 4), pady=6)
+        self._link_text = tk.Label(chip, text="", background=theme.FIELD, foreground=theme.DANGER,
+                                   font=theme.mono(9, "bold"))
+        self._link_text.pack(side="left", padx=(0, 10))
+        self._mode_badge = theme.Badge(bar, "", theme.WARNING)
+        self._mode_badge.pack(side="left", padx=(12, 0), ipady=3)
+        self._queue_badge = theme.Badge(bar, "", theme.MUTED)
+        self._queue_badge.pack(side="left", padx=(8, 0), ipady=3)
+        self._run_badge = theme.Badge(bar, "", theme.MUTED)
+        self._run_badge.pack(side="left", padx=(8, 0), ipady=3)
 
-        run_bar = ttk.Frame(self, padding=(8, 0, 8, 8))
-        run_bar.pack(fill="x")
-        self._experiment_label = ttk.Label(run_bar, text="Queue: empty")
-        self._experiment_label.pack(side="left")
-        self._run_btn = ttk.Button(run_bar, text="Run", command=self._toggle_run, state="disabled")
+        self._abort_btn = ttk.Button(bar, text="■  ABORT", style="Danger.TButton", width=11, command=self._abort)
+        self._abort_btn.pack(side="right")
+        self._run_btn = ttk.Button(bar, text="▶  RUN QUEUE", style="Accent.TButton", width=15,
+                                   command=self._start_run)
+        self._run_btn.pack(side="right", padx=(0, 8))
         self._simulate = tk.BooleanVar(value=True)
-        ttk.Checkbutton(run_bar, text="Simulation", variable=self._simulate,
-                        command=self._update_run_button).pack(side="right", padx=(0, 8))
-        self._run_btn.pack(side="right")
-        self._progress_bar = ttk.Progressbar(run_bar, length=180, mode="determinate")
-        self._progress_bar.pack(side="right", padx=(8, 8))
-        self._progress_label = ttk.Label(run_bar, text="")
-        self._progress_label.pack(side="right")
+        simulate = ttk.Checkbutton(bar, text="SIMULATION", variable=self._simulate, style="Surface.TCheckbutton",
+                                   command=self._update_run_button)
+        simulate.pack(side="right", padx=(0, 18))
+        Tooltip(simulate, "Run the queue without the instrument: the data are simulated")
+        Tooltip(self._abort_btn, "Abort the running queue (sends *RST to the instrument)")
+        return bar
 
-        self._console = ScrolledText(self, state="disabled", font=("Consolas", 10), wrap="word")
-        self._console.pack(fill="both", expand=True, padx=8)
-        self._console.tag_config("sent", foreground="#1f5fbf")
-        self._console.tag_config("recv", foreground="#1b7a33")
-        self._console.tag_config("error", foreground=_COLOR_FAIL)
-        self._console.tag_config("info", foreground="#666666")
+    def _build_sidebar(self) -> tk.Frame:
+        side = tk.Frame(self, background=theme.SURFACE, width=_SIDEBAR_PX)
+        side.pack_propagate(False)
+        tk.Frame(side, width=1, background=theme.BORDER).pack(side="right", fill="y")
+        theme.caption(side, "Instrument consoles", style="Surface.TLabel").pack(side="top", anchor="w",
+                                                                              padx=16, pady=(16, 8))
+        self._nav: dict[str, NavItem] = {}
+        for number, (name, text, icon) in enumerate(PANELS, start=1):
+            item = NavItem(side, text, icon, f"Ctrl+{number}", command=lambda n=name: self.show_panel(n))
+            item.pack(side="top", fill="x")
+            self._nav[name] = item
 
-        bottom = ttk.Frame(self, padding=8)
-        bottom.pack(fill="x")
-        ttk.Label(bottom, text="Command:").pack(side="left")
-        self._command = ttk.Entry(bottom, font=("Consolas", 10))
-        self._command.pack(side="left", fill="x", expand=True, padx=6)
-        self._command.bind("<Return>", lambda _e: self._send_command())
-        self._command.bind("<Up>", lambda _e: self._history_step(-1))
-        self._command.bind("<Down>", lambda _e: self._history_step(1))
-        ttk.Button(bottom, text="Send", command=self._send_command).pack(side="left")
-        self._command.focus_set()
+        tk.Label(side, text=f"BUILD {version_text()}", background=theme.FIELD, foreground=theme.MUTED,
+                 font=theme.mono(8), pady=6, highlightthickness=1,
+                 highlightbackground=theme.BORDER).pack(side="bottom", fill="x", padx=12, pady=(0, 12))
+        box = tk.Frame(side, background=theme.SURFACE)
+        box.pack(side="bottom", fill="x", padx=16, pady=(0, 10))
+        tk.Frame(side, height=1, background=theme.BORDER).pack(side="bottom", fill="x", pady=(0, 10))
+        self._state: dict[str, tk.Label] = {}
+        for key in ("Link", "Mode", "Queue", "Run", "Transients"):
+            row = tk.Frame(box, background=theme.SURFACE)
+            row.pack(side="top", fill="x", pady=1)
+            tk.Label(row, text=key.upper(), background=theme.SURFACE, foreground=theme.MUTED,
+                     font=theme.mono(8)).pack(side="left")
+            value = tk.Label(row, text="", background=theme.SURFACE, foreground=theme.TEXT, font=theme.mono(8))
+            value.pack(side="right")
+            self._state[key] = value
+        self._side_progress = ttk.Progressbar(box, mode="determinate")
+        self._side_progress.pack(side="top", fill="x", pady=(6, 0))
+        return side
 
-        self._history: list[str] = []
-        self._history_pos = 0
+    def _build_status_bar(self) -> ttk.Frame:
+        bar = ttk.Frame(self, style="Surface.TFrame", padding=(14, 5, 14, 5))
+        self._progress_label = ttk.Label(bar, text="Ready", style="Surface.TLabel", foreground=theme.MUTED,
+                                         font=theme.mono(9))
+        self._progress_label.pack(side="left")
+        ttk.Label(bar, text="Ctrl+1…6 switch consoles", style="Surface.TLabel", foreground=theme.DIM,
+                  font=theme.mono(8)).pack(side="right")
+        self._progress_bar = ttk.Progressbar(bar, length=260, mode="determinate")
+        self._progress_bar.pack(side="right", padx=(0, 18))
+        return bar
+
+    def show_panel(self, name: str) -> None:
+        """Show one console in the main area; the AWG generator is built the first time."""
+        if name == self._current:
+            return
+        panel = self._panels.get(name)
+        if panel is None and name == "awg":
+            panel = self._panels["awg"] = self._build_awg_editor()
+        if self._current is not None and self._panels.get(self._current) is not None:
+            self._panels[self._current].pack_forget()
+        panel.pack(fill="both", expand=True)
+        self._current = name
+        for key, item in self._nav.items():
+            item.set_active(key == name)
+
+    def _build_awg_editor(self) -> AwgEditorPanel:
+        limits = self._system.hardware_limits
+        return AwgEditorPanel(self._content, APP_DIR / "data" / "sequences", limits.max_awg_sample_rate_hz,
+                              limits.max_awg_amplitude_A,
+                              on_saved=lambda path, w: self._log(
+                                  "info", f"AWG sequence saved: {path} ({w.n_samples} samples, "
+                                          f"{w.sample_rate_hz:g} Hz)"))
 
     @staticmethod
     def _available_ports() -> list[str]:
         return [p.device for p in list_ports.comports()] + ["loop://"]
 
     def _apply_settings_to_fields(self, settings: ConnectionSettings) -> None:
-        self._port.set(settings.port)
-        self._baud.delete(0, "end")
-        self._baud.insert(0, str(settings.baudrate))
+        self._console.port.set(settings.port)
+        self._console.baud.delete(0, "end")
+        self._console.baud.insert(0, str(settings.baudrate))
 
     def _restore_typed(self) -> None:
         """Put back what the user typed last time: it wins over system.json."""
         saved = user_settings.load_section(_SETTINGS)
-        port = user_settings.text(saved, "port", self._port.get())
-        baud = user_settings.text(saved, "baudrate", self._baud.get())
-        if (port, baud) != (self._port.get(), self._baud.get()):
-            self._port.set(port)
-            self._baud.delete(0, "end")
-            self._baud.insert(0, baud)
+        port_field, baud_field = self._console.port, self._console.baud
+        port = user_settings.text(saved, "port", port_field.get())
+        baud = user_settings.text(saved, "baudrate", baud_field.get())
+        if (port, baud) != (port_field.get(), baud_field.get()):
+            port_field.set(port)
+            baud_field.delete(0, "end")
+            baud_field.insert(0, baud)
             self._log("info", f"Using the last port: {port}, {baud} baud")
         if isinstance(saved.get("simulation"), bool):
             self._simulate.set(saved["simulation"])
         history = saved.get("command_history")
         if isinstance(history, list):
-            self._history = [c for c in history if isinstance(c, str)][-_MAX_SAVED_HISTORY:]
-            self._history_pos = len(self._history)
+            self._console.set_history(history)
 
     def _save_typed(self) -> None:
         user_settings.save_section(_SETTINGS, {
-            "port": self._port.get().strip(),
-            "baudrate": self._baud.get().strip(),
+            "port": self._console.port.get().strip(),
+            "baudrate": self._console.baud.get().strip(),
             "simulation": self._simulate.get(),
-            "command_history": self._history[-_MAX_SAVED_HISTORY:],
+            "command_history": self._console.history[-MAX_SAVED_HISTORY:],
         })
 
     def _set_status(self, connected: bool) -> None:
-        self._status_icon.itemconfig(self._status_dot, fill=_COLOR_OK if connected else _COLOR_FAIL)
-        self._status_label.config(text="Connected" if connected else "Disconnected")
-        self._connect_btn.config(text="Disconnect" if connected else "Connect")
+        port, baud = self._settings.port, self._settings.baudrate
+        text = f"CONNECTED  {port} ({baud})" if connected else f"DISCONNECTED  {port}"
+        colour = theme.OK if connected else theme.DANGER
+        self._link_dot.set(colour)
+        self._link_text.config(text=text, foreground=colour)
+        self._console.set_connected(connected, f"connected {port} ({baud})" if connected else "offline")
+        self._state["Link"].config(text="CONNECTED" if connected else "OFFLINE", foreground=colour)
         self._update_run_button()
 
     def _toggle_connection(self) -> None:
@@ -242,11 +370,11 @@ class App(tk.Tk):
 
     def _connect(self) -> None:
         self._disconnect(quiet=True)
-        port = self._port.get().strip()
+        port = self._console.port.get().strip()
         try:
-            baudrate = int(self._baud.get())
+            baudrate = int(self._console.baud.get())
         except ValueError:
-            self._log("error", f"Invalid baud rate: {self._baud.get()!r}")
+            self._log("error", f"Invalid baud rate: {self._console.baud.get()!r}")
             return
         self._settings = ConnectionSettings(port, baudrate, self._settings.timeout_s)
         self._connection = SCPIConnection(
@@ -261,6 +389,7 @@ class App(tk.Tk):
             self._log("error", f"Cannot connect to {port}: {english_error(e)}")
         else:
             self._log("info", f"Connected to {port} ({baudrate} baud)")
+        self._last_connected = None
         self._poll_status(reschedule=False)
 
     def _disconnect(self, quiet: bool = False) -> None:
@@ -288,15 +417,6 @@ class App(tk.Tk):
         else:
             self._incoming.put(("recv", f"<< {message}"))
 
-    def _send_command(self) -> None:
-        command = self._command.get().strip()
-        if not command:
-            return
-        self._history.append(command)
-        self._history_pos = len(self._history)
-        self._command.delete(0, "end")
-        self._send(command)
-
     def _send(self, command: str) -> None:
         if not self._is_connected():
             self._log("error", f"Not connected - not sent: {command}")
@@ -323,17 +443,10 @@ class App(tk.Tk):
             except Exception as e:
                 self._incoming.put(("error", f"Error sending {command!r}: {english_error(e)}"))
 
-    def _history_step(self, step: int) -> str:
-        if self._history:
-            self._history_pos = max(0, min(len(self._history), self._history_pos + step))
-            self._command.delete(0, "end")
-            if self._history_pos < len(self._history):
-                self._command.insert(0, self._history[self._history_pos])
-        return "break"
-
     def _load_connection_file(self) -> None:
         """Load connection settings from a system.json-style file and connect at once."""
         path = filedialog.askopenfilename(
+            parent=self,
             title="Select connection file",
             initialdir=DEFAULT_SYSTEM_CONFIG.parent,
             filetypes=[("JSON", "*.json"), ("All files", "*.*")],
@@ -350,92 +463,119 @@ class App(tk.Tk):
             return
         settings = system.connection
         self._log("info", f"Loaded connection settings from {path.name}: {settings.port}, {settings.baudrate} baud")
-        if system.hardware_limits != self._system.hardware_limits and self._queue_accepted:
-            self._set_queue(self._queue, accepted=False)
-            self._log("info", "Hardware limits changed - load and accept the queue again")
+        limits_changed = system.hardware_limits != self._system.hardware_limits
         self._system = system
+        self._system_note = f"Loaded from {path}"
+        self._queue_panel.set_limits(system.hardware_limits)
+        if limits_changed and (self._queue_accepted or self._review_items is not None):
+            self._invalidate_review("Hardware limits changed - review the queue again")
         self._settings = settings
         self._apply_settings_to_fields(settings)
+        self._system_panel.show(system, self._system_note)
         self._connect()
 
-    def _load_config_file(self) -> None:
-        """Edit the queue of experiment sets, then review and accept every set."""
+    def _start_review(self, items: list[QueueItem]) -> None:
+        """Show every set of the queue in turn; OK on the last one accepts the queue."""
         if self._runner is not None:
             self._log("error", "The queue is running - abort it before changing it")
             return
-        editor = QueueEditor(self, self._queue, self._system.hardware_limits,
-                             initial_dir=DEFAULT_SYSTEM_CONFIG.parent.parent / "data")
-        items = editor.ask()
+        self._review_items, self._review_index = items, 0
+        self._set_queue(items, accepted=False)
+        self._log("info", f"Queue with {len(items)} set(s) loaded - review every set")
+        self._review.show(items, 0, self._system, accepted=False)
+        self.show_panel("review")
+
+    def _review_ok(self) -> None:
+        items, index = self._review_items, self._review_index
         if items is None:
             return
-        self._set_queue(items, accepted=False)
         n = len(items)
-        self._log("info", f"Queue with {n} set(s) loaded - review every set")
-        for index, item in enumerate(items, start=1):
-            if not self._review(item, index, n):
-                self._log("info", f"Set {index}/{n} ({item.path.name}) rejected - the queue is not accepted")
-                return
-            self._log("info", f"Set {index}/{n} ({item.path.name}) accepted")
+        self._log("info", f"Set {index + 1}/{n} ({items[index].path.name}) accepted")
+        if index + 1 < n:
+            self._review_index = index + 1
+            self._refresh_state()
+            self._review.show(items, index + 1, self._system, accepted=False)
+            return
+        self._review_items = None
         self._set_queue(items, accepted=True)
         self._log("info", "All sets accepted - press Run to start the queue")
+        self._review.show(items, 0, self._system, accepted=True)
 
-    def _review(self, item: QueueItem, index: int, total: int) -> bool:
-        """Show the event timeline (and the AWG channels below it) of one set; True if accepted."""
-        config, awg = item.config, item.awg
-        durations = [
-            awg.duration_s * 1000 if awg is not None and header_matches(e.action.strip().split(" ", 1)[0], ":AWG:RUN")
-            else self._system.event_duration_ms(e.action)
-            for e in config.events
-        ]
-        window = acquisition_window_ms(config)
-        channels = config.acquisition.channels
-        timeline_acq = AcquisitionWindow(window[0], window[1], channels) if window else None
-        rows = len(config.events) + (1 if timeline_acq else 0)
-        events_height = max(4.0, 0.45 * rows + 2)
+    def _review_exit(self) -> None:
+        items, index = self._review_items, self._review_index
+        if items is None:
+            return
+        n = len(items)
+        self._log("info", f"Set {index + 1}/{n} ({items[index].path.name}) rejected - the queue is not accepted")
+        self._review_items = None
+        self._set_queue(items, accepted=False)
+        self._review.show_empty(f"Set {index + 1}/{n} ({items[index].path.name}) was rejected - the queue is "
+                                f"not accepted. Change it and press Review sets again.")
+        self.show_panel("queue")
 
-        def timeline(ax):
-            plot_events(config.events, title=config.experiment_name, ax=ax,
-                        durations_ms=durations, acquisition=timeline_acq)
+    def _queue_edited(self) -> None:
+        """The sets in the queue panel changed: an accepted queue, or one in review, must be reviewed again."""
+        if self._queue_accepted or self._review_items is not None:
+            self._invalidate_review("Queue changed - press Review sets to review it again")
+        self._set_queue(self._queue_panel.items, accepted=False)
 
-        if awg is None:
-            fig = Figure(figsize=(10, events_height), layout="constrained")
-            timeline(fig.add_subplot())
-        else:
-            fig = Figure(figsize=(10, events_height + 6), layout="constrained")
-            top, bottom = fig.subfigures(2, 1, height_ratios=[events_height, 6])
-            timeline(top.add_subplot())
-            acq = config.acquisition
-            end_ms = (acq.start_us / 1000
-                      + acq.duration_s(config.hardware_parameters.acq_sample_rate_hz) * 1000)
-            plot_awg(awg, fig=bottom, acquisition=(acq.start_us / 1000, end_ms, channels))
-        if index < total:
-            hint = f"Set {index}/{total}. Next set starts {format_delay(item.delay_s)} after this one ends."
-        else:
-            hint = f"Set {index}/{total} (last)."
-        hint += " Press OK to accept."
-        return PlotPreview(self, f"Set {index}/{total}: {item.path.name}", fig, hint).ask()
+    def _invalidate_review(self, message: str) -> None:
+        self._review_items = None
+        self._set_queue(self._queue, accepted=False)
+        self._review.show_empty(message + ".")
+        self._log("info", message)
 
     def _set_queue(self, items: list[QueueItem], accepted: bool) -> None:
         self._queue, self._queue_accepted = items, accepted
-        if not items:
-            text = "Queue: empty"
-        else:
-            names = ", ".join(item.path.stem for item in items[:3]) + (", …" if len(items) > 3 else "")
-            text = f"Queue: {len(items)} set(s) [{names}] - {'accepted' if accepted else 'not accepted'}"
-        self._experiment_label.config(text=text)
         self._update_run_button()
 
     def _update_run_button(self) -> None:
-        if self._runner is not None:
-            self._run_btn.config(text="Abort", state="normal")
-        else:
-            ready = self._queue_accepted and (self._simulate.get() or self._is_connected())
-            self._run_btn.config(text="Run", state="normal" if ready else "disabled")
+        running = self._runner is not None
+        can_run = self._queue_accepted and (self._simulate.get() or self._is_connected())
+        self._run_btn.config(state="normal" if can_run and not running else "disabled")
+        self._abort_btn.config(state="normal" if running else "disabled")
+        self._review.set_run_state(can_run, running)
+        self._refresh_state()
 
-    def _toggle_run(self) -> None:
+    def _refresh_state(self) -> None:
+        """The chips of the top bar, the state box and the badges of the sidebar."""
+        running = self._runner is not None
+        simulate = self._simulate.get()
+        self._mode_badge.set("simulation" if simulate else "hardware", theme.WARNING if simulate else theme.INFO)
+        self._state["Mode"].config(text="SIMULATION" if simulate else "HARDWARE",
+                                   foreground=theme.WARNING if simulate else theme.INFO)
+        n = len(self._queue)
+        if self._review_items is not None:
+            queue_text = f"queue {n} set(s) · review {self._review_index + 1}/{len(self._review_items)}"
+            colour = theme.WARNING
+        elif not n:
+            queue_text, colour = "queue empty", theme.MUTED
+        elif self._queue_accepted:
+            queue_text, colour = f"queue {n} set(s) · accepted", theme.OK
+        else:
+            queue_text, colour = f"queue {n} set(s) · not accepted", theme.WARNING
+        self._queue_badge.set(queue_text, colour)
+        self._state["Queue"].config(text=queue_text.removeprefix("queue ").upper(), foreground=colour)
+        self._run_badge.set("running" if running else "idle", theme.ACCENT if running else theme.MUTED)
+        self._state["Run"].config(text="RUNNING" if running else "IDLE",
+                                  foreground=theme.ACCENT if running else theme.MUTED)
+        total = float(self._progress_bar["maximum"])
+        self._state["Transients"].config(text=f"{self._transients_done}/{int(total)}" if running or
+                                         self._transients_done else "–")
+
+        panel_count = len(self._queue_panel.items)
+        self._nav["queue"].set_badge(str(panel_count) if panel_count else "", theme.MUTED)
+        if self._review_items is not None:
+            self._nav["review"].set_badge(f"{self._review_index + 1}/{len(self._review_items)}", theme.WARNING)
+        else:
+            self._nav["review"].set_badge("ok" if self._queue_accepted else "", theme.OK)
+        views = len(self._results.views)
+        self._nav["results"].set_badge("live" if running else str(views) if views else "",
+                                       theme.ACCENT if running else theme.MUTED)
+        self._nav["console"].set_badge("" if self._is_connected() else "off", theme.DANGER)
+
+    def _start_run(self) -> None:
         if self._runner is not None:
-            self._runner.abort()
-            self._log("info", "Aborting...")
             return
         simulate = self._simulate.get()
         if not self._queue_accepted or not (simulate or self._is_connected()):
@@ -460,13 +600,22 @@ class App(tk.Tk):
             self._log("error", f"Cannot start the queue: {english_error(e)}")
             return
         self._transients_done = 0
-        self._progress_bar.config(maximum=sum(i.config.output.average_count for i in self._queue), value=0)
+        total = sum(i.config.output.average_count for i in self._queue)
+        self._progress_bar.config(maximum=total, value=0)
+        self._side_progress.config(maximum=total, value=0)
         self._viewer = None
         mode = " - SIMULATION" if simulate else ""
         self._log("info", f"Starting the queue ({len(self._queue)} set(s)){mode}")
+        self._queue_panel.set_locked(True)
+        self._review.set_locked(True)
         self._update_run_button()
         self._worker = threading.Thread(target=self._run_worker, args=(self._runner,), name="Queue", daemon=True)
         self._worker.start()
+
+    def _abort(self) -> None:
+        if self._runner is not None:
+            self._runner.abort()
+            self._log("info", "Aborting...")
 
     def _run_worker(self, runner: QueueRunner) -> None:
         try:
@@ -487,14 +636,25 @@ class App(tk.Tk):
                 self._incoming.put(("info", f"   {path.name}"))
         self._incoming.put(("finished", outcome))
 
+    def _finished(self, outcome: str) -> None:
+        self._runner = None
+        self._set_progress(outcome)
+        self._queue_panel.set_locked(False)
+        self._review.set_locked(False)
+        if self._viewer is not None and self._viewer.winfo_exists():
+            self._results.rename(self._viewer, self._viewer.folder.name)
+        self._update_run_button()
+
     def _set_progress(self, text: str, value: float | None = None) -> None:
-        """Progress bar and text in the main window and at the bottom of the results window."""
+        """Progress bar and text in the status bar, the sidebar and the live results tab."""
         if value is not None:
             self._progress_bar.config(value=value)
-        self._progress_label.config(text=text)
+            self._side_progress.config(value=value)
+        self._progress_label.config(text=text, foreground=theme.TEXT if self._runner else theme.MUTED)
         if self._viewer is not None and self._viewer.winfo_exists():
             self._viewer.set_progress(float(self._progress_bar["value"]),
                                       float(self._progress_bar["maximum"]), text)
+        self._refresh_state()
 
     def _show_progress(self, set_index: int, transient: int, received: int, expected: int) -> None:
         """Samples of the running transient received so far."""
@@ -503,10 +663,12 @@ class App(tk.Tk):
                            f"{received}/{expected} samples",
                            self._transients_done + (received / expected if expected else 0))
 
-    def _results_window(self, group: ResultGroup) -> ResultsViewer | None:
-        """The live results window: opened with the first data, not reopened if the user closed it."""
+    def _results_window(self, group: ResultGroup) -> ResultsView | None:
+        """The live results tab: opened (and shown) with the first data, not reopened if the user closed it."""
         if self._viewer is None:
-            self._viewer = ResultsViewer(self, group.config_file.parent)
+            folder = group.config_file.parent
+            self._viewer = self._results.new_view(folder, f"● LIVE  {folder.name}")
+            self.show_panel("results")
         return self._viewer if self._viewer.winfo_exists() else None
 
     def _show_live(self, group: ResultGroup, number: int, data: np.ndarray) -> None:
@@ -516,7 +678,7 @@ class App(tk.Tk):
             viewer.show_live(group, number, data, total)
 
     def _show_result(self, group: ResultGroup, transient: Transient, average: np.ndarray, count: int) -> None:
-        """A transient was saved: advance the progress bar and add it to the live results window."""
+        """A transient was saved: advance the progress bar and add it to the live results tab."""
         self._transients_done += 1
         viewer = self._results_window(group)
         self._set_progress(f"Set {group.set_index}/{len(self._queue)}: transient {transient.number}/"
@@ -524,24 +686,21 @@ class App(tk.Tk):
         if viewer is not None:
             viewer.add_transient(group, transient, average, count)
 
-    def _open_awg_editor(self) -> None:
-        limits = self._system.hardware_limits
-        AwgEditor(self, APP_DIR / "data" / "sequences", limits.max_awg_sample_rate_hz, limits.max_awg_amplitude_A,
-                  on_saved=lambda path, w: self._log(
-                      "info", f"AWG sequence saved: {path} ({w.n_samples} samples, {w.sample_rate_hz:g} Hz)"))
-
     def _load_results(self) -> None:
         """Show the results of an earlier run: the user picks its whole folder."""
         try:
             initial = self._ensure_results_dir()
         except OSError:
             initial = APP_DIR
-        folder = filedialog.askdirectory(title="Select the folder of a run (e.g. 20261019_105039)",
+        folder = filedialog.askdirectory(parent=self, title="Select the folder of a run (e.g. 20261019_105039)",
                                          initialdir=initial, mustexist=True)
         if not folder:
             return
+        self.load_results_folder(folder)
+
+    def load_results_folder(self, folder: str | Path) -> None:
         self._log("info", f"Loading results from {folder}...")
-        threading.Thread(target=self._load_results_worker, args=(folder,), name="Load results",
+        threading.Thread(target=self._load_results_worker, args=(str(folder),), name="Load results",
                          daemon=True).start()
 
     def _load_results_worker(self, folder: str) -> None:
@@ -556,7 +715,10 @@ class App(tk.Tk):
             self._log("error", f"   {warning}")
         sets = ", ".join(f"{g.name} ({len(g.transients)})" for g in result.groups)
         self._log("info", f"Loaded results from {result.folder}: {sets}")
-        ResultsViewer(self, result.folder).show_saved(result)
+        view = self._results.new_view(result.folder, result.folder.name)
+        self.show_panel("results")
+        view.show_saved(result)
+        self._refresh_state()
 
     def _results_dir(self) -> Path:
         path = self._system.data_output
@@ -575,7 +737,7 @@ class App(tk.Tk):
         return path
 
     def _maximize(self) -> None:
-        """Start on the whole screen; 820x560 is the size the window gets when restored."""
+        """Start on the whole screen; 1280x820 is the size the window gets when restored."""
         try:
             if sys.platform == "win32":
                 self.state("zoomed")
@@ -595,16 +757,7 @@ class App(tk.Tk):
             log.warning("Window icon not found in %s", ICON_DIR)
 
     def _log(self, tag: str, text: str) -> None:
-        if len(text) > _MAX_LOG_LINE:
-            text = text[:_MAX_LOG_LINE] + f"... ({len(text)} characters)"
-        stamp = datetime.now().strftime("%H:%M:%S")
-        self._console.config(state="normal")
-        self._console.insert("end", f"[{stamp}] {text}\n", tag)
-        lines = int(self._console.index("end-1c").split(".")[0])
-        if lines > _MAX_CONSOLE_LINES:
-            self._console.delete("1.0", f"{lines - _MAX_CONSOLE_LINES + 1}.0")
-        self._console.see("end")
-        self._console.config(state="disabled")
+        self._console.log(tag, text)
 
     def _drain_log(self) -> None:
         """Handle what the worker threads sent. Always scheduled again - an error in one
@@ -649,9 +802,7 @@ class App(tk.Tk):
                     self._log("error", f"Cannot load results: {text}")
                     messagebox.showerror("Cannot load results", text, parent=self)
                 elif tag == "finished":
-                    self._runner = None
-                    self._set_progress(text)
-                    self._update_run_button()
+                    self._finished(text)
                 else:
                     self._log(tag, text)
         finally:

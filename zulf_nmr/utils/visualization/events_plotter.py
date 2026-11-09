@@ -15,16 +15,17 @@ from matplotlib.patches import Rectangle
 
 from zulf_nmr.core.scpi import mnemonic_matches
 from zulf_nmr.experiment.parser import Event, ExperimentConfig
+from zulf_nmr.utils.visualization import plot_style
 
 CATEGORIES = {
-    "Shim": ("SHIM", "#0072B2"),
-    "Motor": ("MOTor", "#E69F00"),
-    "Digital": ("DIGital", "#CC79A7"),
-    "AWG": ("AWG", "#56B4E9"),
-    "Acquisition": ("ACQuire", "#D55E00"),
-    "Sequence": ("SEQuence", "#009E73"),
+    "Shim": ("SHIM", "#3b82f6"),
+    "Motor": ("MOTor", "#eab308"),
+    "Digital": ("DIGital", "#ec4899"),
+    "AWG": ("AWG", "#22c3e6"),
+    "Acquisition": ("ACQuire", "#f97316"),
+    "Sequence": ("SEQuence", "#22c55e"),
 }
-OTHER = ("Other", "#7F7F7F")
+OTHER = ("Other", "#94a3b8")
 
 
 def event_category(action: str) -> tuple[str, str]:
@@ -50,7 +51,7 @@ def load_events(source: ExperimentConfig | str | Path) -> tuple[str, list[Event]
     return data.get("experiment_name", path.stem), sorted(events, key=lambda e: e.time_ms)
 
 
-ACQUISITION_COLOUR = "#D55E00"
+ACQUISITION_COLOUR = "#f97316"
 
 
 @dataclass(frozen=True)
@@ -68,11 +69,13 @@ def plot_events(
     ax: Axes | None = None,
     durations_ms: Sequence[float | None] | None = None,
     acquisition: AcquisitionWindow | None = None,
+    show_title: bool = True,
 ) -> Figure | SubFigure:
     """Draw one row per event (first event on top): a dot at its time, a bar as
     long as its duration (durations_ms, one per event, None = unknown), the
     command on the right, coloured by subsystem. acquisition adds a bottom row
-    with the recording window and its channels."""
+    with the recording window and its channels. show_title=False leaves out the title
+    (for a panel that shows it itself)."""
     events = list(events)
     durations = list(durations_ms) if durations_ms is not None else [None] * len(events)
     n_rows = len(events) + (1 if acquisition else 0)
@@ -94,7 +97,7 @@ def plot_events(
     for y, event, duration in zip(rows, events, durations):
         name, colour = event_category(event.action)
         used.setdefault(name, colour)
-        ax.hlines(y, 0, event.time_ms, color="#D0D0D0", linewidth=0.8, zorder=1)
+        ax.hlines(y, 0, event.time_ms, color=plot_style.GUIDE, linewidth=0.8, zorder=1)
         if duration:
             ax.add_patch(Rectangle((event.time_ms, y - 0.28), duration, 0.56, facecolor=colour,
                                    alpha=0.35, edgecolor=colour, linewidth=0.8, zorder=2))
@@ -102,7 +105,7 @@ def plot_events(
         label = f"{event.time_ms:g} ms" + (f"  (+{duration:g} ms)" if duration else "")
         ax.annotate(
             label, (event.time_ms + (duration or 0), y), xytext=(6, 0),
-            textcoords="offset points", va="center", fontsize=8, color="#404040", clip_on=True,
+            textcoords="offset points", va="center", fontsize=8, color=plot_style.MUTED, clip_on=True,
         )
         side_labels.append((ax.annotate(
             event.action, (1.01, y), xycoords=("axes fraction", "data"),
@@ -117,7 +120,7 @@ def plot_events(
         channels = ", ".join(map(str, acquisition.channels))
         ax.annotate(
             f"{acquisition.start_ms:g} – {acquisition.end_ms:g} ms", (acquisition.start_ms, y),
-            xytext=(4, 0), textcoords="offset points", va="center", fontsize=8, color="#404040", clip_on=True,
+            xytext=(4, 0), textcoords="offset points", va="center", fontsize=8, color=plot_style.MUTED, clip_on=True,
         )
         side_labels.append((ax.annotate(
             f"Acquisition, CH {channels}", (1.01, y), xycoords=("axes fraction", "data"),
@@ -146,8 +149,9 @@ def plot_events(
         handles=handles, loc="lower center", bbox_to_anchor=(0.5, 1.0),
         ncol=max(len(handles), 1), frameon=False, fontsize=9,
     )
-    ax.set_title(f"Sequence timeline — {title}" if title else "Sequence timeline",
-                 fontweight="bold", pad=28)
+    if show_title:
+        ax.set_title(f"Sequence timeline — {title}" if title else "Sequence timeline",
+                     fontweight="bold", pad=28)
     if isinstance(fig, Figure) and fig.get_layout_engine() is None:
         fig.tight_layout()
     return fig
@@ -164,6 +168,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("config", type=Path)
     parser.add_argument("-o", "--output", type=Path, help="save to file instead of showing a window")
     args = parser.parse_args(argv)
+    plot_style.apply()
     fig = plot_experiment(args.config)
     if args.output:
         fig.savefig(args.output, dpi=150, bbox_inches="tight")

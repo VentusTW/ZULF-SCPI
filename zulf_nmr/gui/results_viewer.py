@@ -1,4 +1,5 @@
-"""Live results window: every transient and the running average of each set, with spectra."""
+"""Results panel: tabs of runs, each with every transient and the running average of each
+set, with spectra - live while the queue runs, or read back from a saved run."""
 
 from __future__ import annotations
 
@@ -14,6 +15,7 @@ from matplotlib.figure import Figure
 from matplotlib.widgets import SpanSelector
 
 from zulf_nmr.experiment.schedule import QueueResult, ResultGroup, Transient
+from zulf_nmr.gui import theme
 from zulf_nmr.gui.tooltip import Tooltip
 from zulf_nmr.utils.visualization.results_plotter import (
     sample_range,
@@ -26,13 +28,14 @@ from zulf_nmr.utils.visualization.results_plotter import (
 
 ROW_SIZE_IN = (11.0, 3.6)
 LIVE_AVERAGE_INTERVAL_S = 1.0
-SELECTION_COLOUR = "#999999"
-CURSOR_COLOUR = "#C0392B"
+SELECTION_COLOUR = "#94a3b8"
+CURSOR_COLOUR = "#f87171"
 EDGE_GRAB_PX = 10
 ZOOM_STEP = 1.25
 PAN_STEP = 0.2
 _MARGIN_PX = {"left": 64, "right": 14, "top": 40, "bottom": 40, "gap": 74}
 _TIME_SHARE = 0.6
+_ROW_BORDER_PX = 1
 
 
 class RowToolbar(NavigationToolbar2Tk):
@@ -49,12 +52,8 @@ class RowToolbar(NavigationToolbar2Tk):
         self.config(height=36)
         self.cursors_button = self._Button("Cursors", None, True, row.toggle_cursors)
         Tooltip(self.cursors_button, "Measuring cursors A and B: click or drag on a plot")
-        background = ttk.Style().lookup("TFrame", "background")
-        for widget in (self, *self.winfo_children()):
-            try:
-                widget.config(background=background)
-            except tk.TclError:
-                pass
+        theme.style_toolbar(self, theme.PANEL)
+        self.cursors_button.config(font=theme.mono(9), padx=6)
 
     def home(self, *args) -> None:
         self._row.reset_view()
@@ -100,16 +99,22 @@ class TraceRow:
         self.on_scroll = on_scroll
         self._size: tuple[int, int] | None = None
 
-        self.frame = ttk.Frame(master)
-        self._header = ttk.Frame(self.frame)
-        self._header.pack(side="top", fill="x", pady=(4, 0))
-        self._toggle = ttk.Button(self._header, text="+", width=3, command=self.toggle)
+        self.frame = tk.Frame(master, background=theme.PANEL, highlightthickness=1,
+                              highlightbackground=theme.ACCENT_SOFT if average else theme.BORDER,
+                              highlightcolor=theme.ACCENT_SOFT if average else theme.BORDER)
+        self._header = ttk.Frame(self.frame, style="Card.TFrame", padding=(6, 4))
+        self._header.pack(side="top", fill="x")
+        self._toggle = ttk.Button(self._header, text="+", width=3, style="Small.TButton", command=self.toggle)
         self._toggle.pack(side="left")
-        self._name = ttk.Label(self._header, text="", font=("Segoe UI", 9, "bold" if average else "normal"),
-                               cursor="hand2")
+        if average:
+            theme.Badge(self._header, "average", theme.ACCENT).pack(side="left", padx=(8, 0))
+        self._name = ttk.Label(self._header, text="", style="Card.TLabel", cursor="hand2",
+                               font=theme.mono(9, "bold" if average else "normal"),
+                               foreground=theme.TEXT if average else theme.MUTED)
         self._name.pack(side="left", padx=6)
         self._name.bind("<Button-1>", lambda _e: self.toggle())
-        self._readout = ttk.Label(self.frame, text="", font=("Consolas", 9), foreground=CURSOR_COLOUR)
+        self._readout = ttk.Label(self.frame, text="", style="Card.TLabel", font=theme.mono(9),
+                                  foreground=CURSOR_COLOUR)
         for w in (self._header, self._toggle, self._name, self._readout):
             w.bind("<MouseWheel>", lambda e: self.on_scroll and self.on_scroll(e.delta / 120))
 
@@ -130,7 +135,7 @@ class TraceRow:
         self._watch_limits(self.ax_time, "time")
         self._watch_limits(self.ax_spec, "spec")
         self.canvas = FigureCanvasTkAgg(self.figure, master=self.frame)
-        self.widget = self.canvas.get_tk_widget()
+        self.widget = theme.figure_widget(self.canvas)
         if self._size is not None:
             self.widget.config(width=self._size[0], height=self._size[1])
         self.toolbar = RowToolbar(self.canvas, self._header, self)
@@ -188,7 +193,8 @@ class TraceRow:
         if self.figure is None:
             return
         self._background = None
-        self.ax_time.set_title(title, loc="left", fontsize=8, fontweight="bold" if self.average else None)
+        self.ax_time.set_title(title, loc="left", fontsize=8, fontweight="bold" if self.average else None,
+                               color=theme.TEXT if self.average else theme.MUTED)
         data = self.data
 
         def smoothed() -> tuple[np.ndarray, np.ndarray]:
@@ -236,7 +242,8 @@ class TraceRow:
         i0, i1 = sample_range(len(self.data), self.rate, self.t_range, self.start_s)
         self._spectrum = spectrum(self.data[i0:i1], self.rate)
         self._spec_curves.set_data(*self._spectrum)
-        self.ax_spec.set_title(spectrum_title(i0, i1, self.rate, self.start_s), loc="left", fontsize=9)
+        self.ax_spec.set_title(spectrum_title(i0, i1, self.rate, self.start_s), loc="left", fontsize=8,
+                               color=theme.MUTED)
         ylim = self._spec_curves.y_limits()
         self._set_limits(self.ax_spec, "spec", (0, self.rate / 2), ylim and (min(0.0, ylim[0]), ylim[1]))
         self._draw_cursors("spec")
@@ -577,7 +584,7 @@ class EdgeDialog(tk.Toplevel):
 
     def __init__(self, master: tk.Misc, name: str, extents: tuple[float, float], edge: int,
                  limits: tuple[float, float], on_apply, on_close=None) -> None:
-        super().__init__(master)
+        super().__init__(master, background=theme.BACKGROUND)
         self._on_close = on_close
         self.bind("<Destroy>", lambda e: e.widget is self and self._on_close and self._on_close())
         self.title(f"{name} of the range")
@@ -592,16 +599,17 @@ class EdgeDialog(tk.Toplevel):
         self._value = tk.StringVar(value=f"{extents[edge]:.6g}")
         entry = ttk.Entry(frame, textvariable=self._value, width=14)
         entry.grid(row=1, column=0, sticky="w", pady=6)
-        ttk.Button(frame, text="OK", command=self._ok).grid(row=1, column=2, sticky="e")
+        ttk.Button(frame, text="OK", style="Accent.TButton", command=self._ok).grid(row=1, column=2, sticky="e")
         ttk.Button(frame, text="Cancel", command=self.destroy).grid(row=1, column=1, sticky="e", padx=6)
         self._error = ttk.Label(frame, text=f"Allowed: {limits[0]:.6g} - {limits[1]:.6g} s",
-                                foreground="#666666")
+                                foreground=theme.MUTED)
         self._error.grid(row=2, column=0, columnspan=3, sticky="w")
 
         entry.bind("<Return>", lambda _e: self._ok())
         self.bind("<Escape>", lambda _e: self.destroy())
         x, y = self.winfo_pointerxy()
         self.geometry(f"+{x + 12}+{y + 12}")
+        theme.dark_title_bar(self)
         entry.focus_set()
         entry.select_range(0, "end")
         self.grab_set()
@@ -624,38 +632,40 @@ class EdgeDialog(tk.Toplevel):
         self._on_apply(t0, t1)
 
     def _fail(self, message: str) -> None:
-        self._error.config(text=message, foreground="#d0342c")
+        self._error.config(text=message, foreground=theme.DANGER)
         self.bell()
 
 
-class ResultsViewer(tk.Toplevel):
-    """Rows top to bottom: set 1 transients, set 1 average, set 2... Rows are added
-    while the queue runs; the average row of a set is redrawn after every transient."""
+class ResultsView(ttk.Frame):
+    """One run in a tab. Rows top to bottom: set 1 transients, set 1 average, set 2...
+    Rows are added while the queue runs; the average row of a set is redrawn after every
+    transient."""
 
-    def __init__(self, parent: tk.Misc, folder: Path) -> None:
-        super().__init__(parent)
-        self.title(f"Results — {folder.name}")
+    def __init__(self, parent: tk.Misc, folder: Path, on_close=None) -> None:
+        super().__init__(parent, padding=(0, 10, 0, 0))
+        self.folder = folder
         dpi = self.winfo_fpixels("1i")
         self._row_px = [int(ROW_SIZE_IN[0] * dpi), int(ROW_SIZE_IN[1] * dpi)]
-        self.geometry(f"{self.winfo_screenwidth() - 80}x{self.winfo_screenheight() - 120}+40+20")
 
-        progress = ttk.Frame(self, padding=(8, 0, 8, 8))
-        progress.pack(side="bottom", fill="x")
-        self._progress_text = ttk.Label(progress, text="", width=48)
-        self._progress_text.pack(side="left")
-        self._progress = ttk.Progressbar(progress, mode="determinate")
-        self._progress.pack(side="left", fill="x", expand=True, padx=(8, 0))
-
-        bottom = ttk.Frame(self, padding=8)
-        bottom.pack(side="bottom", fill="x")
-        ttk.Label(bottom, text=str(folder)).pack(side="left")
-        ttk.Button(bottom, text="Close", command=self.destroy).pack(side="right")
+        bottom = theme.card(self, padding=8)
+        bottom.pack(side="bottom", fill="x", pady=(10, 0))
+        theme.caption(bottom.body, "Folder").pack(side="left")
+        ttk.Label(bottom.body, text=str(folder), style="Card.TLabel", foreground=theme.ACCENT,
+                  font=theme.mono(9)).pack(side="left", padx=(6, 16))
+        ttk.Button(bottom.body, text="Close tab", style="Small.TButton",
+                   command=on_close or self.destroy).pack(side="right")
+        self._progress = ttk.Progressbar(bottom.body, mode="determinate", length=220)
+        self._progress.pack(side="right", padx=(8, 12))
+        self._progress_text = ttk.Label(bottom.body, text="", style="Card.TLabel", foreground=theme.MUTED,
+                                        font=theme.mono(9))
+        self._progress_text.pack(side="right")
 
         holder = ttk.Frame(self)
         holder.pack(side="top", fill="both", expand=True)
         scroll = ttk.Scrollbar(holder, orient="vertical")
         scroll.pack(side="right", fill="y")
-        self._view = tk.Canvas(holder, highlightthickness=0, yscrollcommand=scroll.set)
+        self._view = tk.Canvas(holder, highlightthickness=0, yscrollcommand=scroll.set,
+                               background=theme.BACKGROUND)
         self._view.pack(side="left", fill="both", expand=True)
         scroll.config(command=self._view.yview)
         self._inner = ttk.Frame(self._view)
@@ -663,6 +673,7 @@ class ResultsViewer(tk.Toplevel):
         self._inner.bind("<Configure>", lambda _e: self._view.config(scrollregion=self._view.bbox("all")))
         self._view.bind("<Configure>", self._on_resize)
         self._view.bind("<MouseWheel>", self._on_wheel)
+        self._inner.bind("<MouseWheel>", self._on_wheel)
 
         self._averages: dict[int, TraceRow] = {}
         self._rows: dict[tuple[int, int], TraceRow] = {}
@@ -773,10 +784,11 @@ class ResultsViewer(tk.Toplevel):
             self._view.yview_moveto(1.0)
 
     def _on_resize(self, event: tk.Event) -> None:
-        """Stretch every row to the width of the window (the figures follow their widgets)."""
-        if event.width < 200 or event.width == self._row_px[0]:
+        """Stretch every row to the width of the view (the figures follow their widgets)."""
+        width = event.width - 2 * _ROW_BORDER_PX
+        if width < 200 or width == self._row_px[0]:
             return
-        self._row_px[0] = event.width
+        self._row_px[0] = width
         self._view.itemconfigure(self._inner_id, width=event.width)
         for row in (*self._rows.values(), *self._averages.values()):
             row.set_size(*self._row_px)
@@ -784,12 +796,70 @@ class ResultsViewer(tk.Toplevel):
     def _pack(self, row: TraceRow, before: tk.Widget | None = None) -> None:
         row.set_size(*self._row_px)
         if before is None:
-            row.frame.pack(side="top", fill="x", anchor="w")
+            row.frame.pack(side="top", fill="x", anchor="w", pady=(0, 8))
         else:
-            row.frame.pack(side="top", fill="x", anchor="w", before=before)
+            row.frame.pack(side="top", fill="x", anchor="w", pady=(0, 8), before=before)
 
     def _on_wheel(self, event: tk.Event) -> None:
         self._scroll(event.delta / 120)
 
     def _scroll(self, notches: float) -> None:
         self._view.yview_scroll(int(-notches * 3), "units")
+
+
+class ResultsPanel(ttk.Frame):
+    """Tabs of results: the live run(s) and runs loaded from their folders."""
+
+    def __init__(self, parent: tk.Misc, on_load) -> None:
+        super().__init__(parent, padding=(18, 16, 18, 16))
+        head = theme.card(self, padding=12)
+        head.pack(side="top", fill="x")
+        theme.heading(head.body, "Results").pack(side="left")
+        self._count = theme.Badge(head.body, "no runs open", theme.MUTED)
+        self._count.pack(side="left", padx=10)
+        ttk.Button(head.body, text="Load results…", command=on_load).pack(side="right")
+        ttk.Label(head.body, text="Ctrl + wheel: zoom   Shift + wheel: pan   drag: spectrum range",
+                  style="Card.TLabel", foreground=theme.MUTED, font=theme.mono(8)).pack(side="right", padx=16)
+
+        self._tabs = ttk.Notebook(self)
+        self._empty = ttk.Frame(self)
+        ttk.Label(self._empty, text="No results open.\n\nRun the queue to see every transient live, "
+                                    "or load the folder of an earlier run.",
+                  foreground=theme.MUTED, font=theme.sans(11), justify="center").pack(pady=(80, 16))
+        ttk.Button(self._empty, text="Load results…", style="Accent.TButton", command=on_load).pack()
+        self._views: list[ResultsView] = []
+        self._update()
+
+    @property
+    def views(self) -> list[ResultsView]:
+        return list(self._views)
+
+    def new_view(self, folder: Path, title: str) -> ResultsView:
+        """A new tab, shown at once."""
+        view = ResultsView(self._tabs, folder, on_close=lambda: self.close(view))
+        self._views.append(view)
+        self._tabs.add(view, text=title)
+        self._tabs.select(view)
+        self._update()
+        return view
+
+    def rename(self, view: ResultsView, title: str) -> None:
+        if view in self._views:
+            self._tabs.tab(view, text=title)
+
+    def close(self, view: ResultsView) -> None:
+        if view in self._views:
+            self._views.remove(view)
+            self._tabs.forget(view)
+            view.destroy()
+            self._update()
+
+    def _update(self) -> None:
+        n = len(self._views)
+        self._count.set(f"{n} run(s) open" if n else "no runs open", theme.ACCENT if n else theme.MUTED)
+        if n:
+            self._empty.pack_forget()
+            self._tabs.pack(side="top", fill="both", expand=True, pady=(12, 0))
+        else:
+            self._tabs.pack_forget()
+            self._empty.pack(side="top", fill="both", expand=True)
