@@ -92,6 +92,7 @@ class App(tk.Tk):
         self._set_icon()
         self.geometry("820x560")
         self.minsize(640, 400)
+        self._maximize()
 
         self._incoming: queue.Queue[tuple[str, Any]] = queue.Queue()
         self._outgoing: queue.Queue[tuple[SCPIConnection, str]] = queue.Queue()
@@ -572,6 +573,16 @@ class App(tk.Tk):
                 raise
             self._log("info", f"Created the results folder {path}")
         return path
+
+    def _maximize(self) -> None:
+        """Start on the whole screen; 820x560 is the size the window gets when restored."""
+        try:
+            if sys.platform == "win32":
+                self.state("zoomed")
+            else:
+                self.attributes("-zoomed", True)
+        except tk.TclError:
+            self.geometry(f"{self.winfo_screenwidth()}x{self.winfo_screenheight()}+0+0")
 
     def _set_icon(self) -> None:
         """DM Technologies logo instead of Tk's feather, for this and every later window."""
