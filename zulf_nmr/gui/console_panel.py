@@ -7,7 +7,6 @@ import tkinter as tk
 from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
-from tkinter.scrolledtext import ScrolledText
 from typing import Callable
 
 from zulf_nmr.core.errors import english_error
@@ -86,18 +85,22 @@ class ConsolePanel(ttk.Frame):
         ttk.Button(head, text="Save log…", style="Small.TButton", command=self._save_log).pack(side="right")
         ttk.Button(head, text="Clear", style="Small.TButton", command=self.clear).pack(side="right", padx=(0, 6))
 
-        self._text = ScrolledText(console.body, state="disabled", font=theme.mono(10), wrap="word",
-                                  background=theme.FIELD, foreground=theme.TEXT, borderwidth=0,
-                                  highlightthickness=0, padx=10, pady=8, insertbackground=theme.TEXT)
-        self._text.vbar.config(background=theme.RAISED, troughcolor=theme.FIELD, borderwidth=0,
-                               activebackground=theme.RAISED_HOVER, highlightthickness=0)
-        self._text.pack(side="top", fill="both", expand=True)
+        self._log_frame = tk.Frame(console.body, background=theme.FIELD, borderwidth=0, highlightthickness=0)
+        self._log_frame.pack(side="top", fill="both", expand=True)
+        scroll = ttk.Scrollbar(self._log_frame, orient="vertical", style="Field.Vertical.TScrollbar")
+        scroll.pack(side="right", fill="y")
+        self._text = tk.Text(self._log_frame, state="disabled", font=theme.mono(10), wrap="word",
+                             background=theme.FIELD, foreground=theme.TEXT, borderwidth=0,
+                             highlightthickness=0, padx=10, pady=8, insertbackground=theme.TEXT,
+                             yscrollcommand=scroll.set)
+        self._text.pack(side="left", fill="both", expand=True)
+        scroll.config(command=self._text.yview)
         for tag, colour in tag_colours().items():
             self._text.tag_config(tag, foreground=colour)
         self._text.tag_config("stamp", foreground=theme.DIM)
 
         command = ttk.Frame(console.body, style="Card.TFrame", padding=(14, 10, 14, 12))
-        command.pack(side="bottom", fill="x", before=self._text)
+        command.pack(side="bottom", fill="x", before=self._log_frame)
         ttk.Label(command, text="›", style="Card.TLabel", foreground=theme.ACCENT,
                   font=theme.mono(14, "bold")).pack(side="left")
         self.command = ttk.Entry(command, font=theme.mono(10))

@@ -317,6 +317,7 @@ def _configure_styles(style: ttk.Style) -> None:
     style.configure("TScrollbar", background=RAISED, troughcolor=BACKGROUND, bordercolor=BACKGROUND,
                     lightcolor=RAISED, darkcolor=RAISED, arrowcolor=MUTED, gripcount=0, arrowsize=12)
     style.map("TScrollbar", background=[("active", RAISED_HOVER)], arrowcolor=[("active", ACCENT)])
+    style.configure("Field.Vertical.TScrollbar", troughcolor=FIELD, bordercolor=FIELD)
 
     style.configure("TProgressbar", background=ACCENT, troughcolor=FIELD, bordercolor=BORDER,
                     lightcolor=ACCENT, darkcolor=ACCENT, thickness=8)
