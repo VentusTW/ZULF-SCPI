@@ -49,7 +49,6 @@ class ConsolePanel(ttk.Frame):
         theme.heading(title, "Connection").pack(side="left")
         self.state_badge = theme.Badge(title, "offline", theme.DANGER)
         self.state_badge.pack(side="left", padx=10)
-        theme.caption(title, "Serial port of the instrument (or loop:// to test without one)").pack(side="right")
 
         row = ttk.Frame(body, style="Card.TFrame")
         row.pack(side="top", fill="x", pady=(12, 0))
@@ -60,6 +59,7 @@ class ConsolePanel(ttk.Frame):
         theme.caption(row, "Baud").pack(side="left")
         self.baud = ttk.Entry(row, width=10, font=theme.mono(10))
         self.baud.pack(side="left", padx=(6, 16))
+        Tooltip(self.port, "Serial port of the instrument (or loop:// to test without one)")
         self.port.bind("<<ComboboxSelected>>", lambda _e: on_connect())
         self.port.bind("<Return>", lambda _e: on_connect())
         self.baud.bind("<Return>", lambda _e: on_connect())

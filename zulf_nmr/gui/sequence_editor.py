@@ -201,10 +201,6 @@ class SequenceEditorPanel(ttk.Frame):
                      font=theme.mono(9)).pack(side="right", padx=(0, 16))
         theme.caption(bar, "Grid (ms)").pack(side="right", padx=(0, 6))
 
-        ttk.Label(timeline.body, text="Click an event to edit it, drag its block to move it (on the grid). "
-                                      "Ctrl + wheel: zoom   Shift + wheel: scroll in time   Delete: remove",
-                  style="Card.TLabel", foreground=theme.MUTED, font=theme.mono(8)).pack(side="bottom", anchor="w",
-                                                                                        pady=(6, 0))
         holder = ttk.Frame(timeline.body, style="Card.TFrame")
         holder.pack(side="top", fill="both", expand=True)
         xscroll = ttk.Scrollbar(holder, orient="horizontal")
@@ -222,6 +218,8 @@ class SequenceEditorPanel(ttk.Frame):
         self._canvas.bind("<MouseWheel>", self._wheel)
         self._canvas.bind("<Configure>", lambda _e: self._fit() if self._auto_fit else self._draw())
         self._canvas.bind("<Delete>", lambda _e: self._delete())
+        Tooltip(self._canvas, "Click an event to edit it, drag its block to move it (on the grid).\n"
+                              "Ctrl + wheel: zoom   Shift + wheel: scroll in time   Delete: remove")
         self._snap.trace_add("write", lambda *_: self._draw())
 
     def _build_form(self, body: ttk.Frame) -> None:
@@ -601,7 +599,7 @@ class SequenceEditorPanel(ttk.Frame):
         if event is None:
             for var in (self._time, self._kind, self._arg1, self._arg2, self._command):
                 var.set("")
-            self._event_note.config(text="Click an event on the timeline, or add one with + Add event.")
+            self._event_note.config(text="")
         else:
             if self.focus_get() is not self._time_entry:
                 self._time.set(str(event.time_ms))

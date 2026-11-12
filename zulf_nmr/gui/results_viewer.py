@@ -562,7 +562,7 @@ class TraceRow:
         plot = self._cursor_plot
         positions = self._cursor_x[plot]
         if all(x is None for x in positions):
-            self._readout.config(text="Cursors: click on a plot to put cursor A, then B; drag a cursor to move it.")
+            self._readout.config(text="Cursors: none placed")
             return
         unit = "s" if plot == "time" else "Hz"
         parts = []
@@ -706,7 +706,7 @@ class TransientBrowser:
         if on_3d is not None:
             three_d = ttk.Button(picker, text="3D", style="Small.TButton", command=lambda: on_3d(self))
             three_d.pack(side="left", padx=(6, 0))
-            Tooltip(three_d, "Experimental: all transients of this set in one 3D plot (transient number on z)")
+            Tooltip(three_d, "Experimental: all transients of this set as a map or a 3D plot")
         Tooltip(self._entry, "Type a transient number and press Enter")
         for widget in (picker, *picker.winfo_children()):
             widget.bind("<MouseWheel>", lambda e: on_scroll and on_scroll(e.delta / 120), add="+")
@@ -986,13 +986,10 @@ class ResultsPanel(ttk.Frame):
         self._count = theme.Badge(head.body, "no runs open", theme.MUTED)
         self._count.pack(side="left", padx=10)
         ttk.Button(head.body, text="Load results…", command=on_load).pack(side="right")
-        ttk.Label(head.body, text="Ctrl + wheel: zoom   Shift + wheel: pan   drag: spectrum range",
-                  style="Card.TLabel", foreground=theme.MUTED, font=theme.mono(8)).pack(side="right", padx=16)
 
         self._tabs = theme.closable_notebook(self, self.close)
         self._empty = ttk.Frame(self)
-        ttk.Label(self._empty, text="No results open.\n\nRun the queue to see every transient live, "
-                                    "or load the folder of an earlier run.",
+        ttk.Label(self._empty, text="No results open.",
                   foreground=theme.MUTED, font=theme.sans(11), justify="center").pack(pady=(80, 16))
         ttk.Button(self._empty, text="Load results…", style="Accent.TButton", command=on_load).pack()
         self._views: list[ResultsView] = []

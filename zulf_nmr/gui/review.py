@@ -66,7 +66,7 @@ class ReviewPanel(ttk.Frame):
         self._canvases: list[FigureCanvasTkAgg] = []
         self._cards: list[tk.Frame] = []
         self._build(on_queue)
-        self.show_empty("No set to review yet. Build the queue and press Review sets.")
+        self.show_empty("No set to review yet.")
 
     def _build(self, on_queue) -> None:
         header = theme.card(self)
@@ -115,8 +115,6 @@ class ReviewPanel(ttk.Frame):
 
         footer = theme.card(self, padding=10)
         footer.pack(side="bottom", fill="x", pady=(12, 0))
-        ttk.Label(footer.body, text="ⓘ", style="Card.TLabel", foreground=theme.ACCENT,
-                  font=theme.sans(13)).pack(side="left")
         self._hint = ttk.Label(footer.body, text="", style="Card.TLabel", font=theme.sans(10))
         self._hint.pack(side="left", padx=8)
         self.ok_btn = ttk.Button(footer.body, text="OK", style="Accent.TButton", width=12, command=self._ok)
@@ -186,12 +184,12 @@ class ReviewPanel(ttk.Frame):
                   f"{awg.duration_s * 1000:g} ms") if awg is not None else "none")
 
         if accepted:
-            self._hint.config(text=f"All {total} set(s) accepted. Press RUN QUEUE at the top to start the queue.")
+            self._hint.config(text=f"All {total} set(s) accepted.")
         elif index < total - 1:
             self._hint.config(text=f"Set {index + 1}/{total}. Next set starts {format_delay(item.delay_s)} "
-                                   f"after this one ends. Press OK to accept.")
+                                   f"after this one ends.")
         else:
-            self._hint.config(text=f"Set {index + 1}/{total} (last). Press OK to accept the queue.")
+            self._hint.config(text=f"Set {index + 1}/{total} (last).")
         self._draw(item, system)
         self._update_buttons()
         if not accepted:

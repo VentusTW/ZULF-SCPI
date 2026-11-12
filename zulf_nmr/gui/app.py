@@ -300,8 +300,6 @@ class App(tk.Tk):
         self._progress_label = ttk.Label(bar, text="Ready", style="Surface.TLabel", foreground=theme.MUTED,
                                          font=theme.mono(9))
         self._progress_label.pack(side="left")
-        ttk.Label(bar, text="Ctrl+1…7 switch consoles   Ctrl+B menu", style="Surface.TLabel", foreground=theme.DIM,
-                  font=theme.mono(8)).pack(side="right")
         self._progress_bar = ttk.Progressbar(bar, length=260, mode="determinate")
         self._progress_bar.pack(side="right", padx=(0, 18))
         return bar
@@ -552,7 +550,7 @@ class App(tk.Tk):
             return
         self._review_items = None
         self._set_queue(items, accepted=True)
-        self._log("info", "All sets accepted - press Run to start the queue")
+        self._log("info", "All sets accepted")
         self._review.show(items, 0, self._system, accepted=True)
 
     def _review_exit(self) -> None:
@@ -564,13 +562,13 @@ class App(tk.Tk):
         self._review_items = None
         self._set_queue(items, accepted=False)
         self._review.show_empty(f"Set {index + 1}/{n} ({items[index].path.name}) was rejected - the queue is "
-                                f"not accepted. Change it and press Review sets again.")
+                                f"not accepted.")
         self.show_panel("queue")
 
     def _queue_edited(self) -> None:
         """The sets in the queue panel changed: an accepted queue, or one in review, must be reviewed again."""
         if self._queue_accepted or self._review_items is not None:
-            self._invalidate_review("Queue changed - press Review sets to review it again")
+            self._invalidate_review("Queue changed - it has to be reviewed again")
         self._set_queue(self._queue_panel.items, accepted=False)
 
     def _invalidate_review(self, message: str) -> None:

@@ -24,7 +24,6 @@ from zulf_nmr.hardware.awg_formula import (
 )
 from zulf_nmr.gui import theme, user_settings
 from zulf_nmr.gui.axis_drag import AxisDrag
-from zulf_nmr.gui.formula_hint import GhostText
 from zulf_nmr.gui.tooltip import Tooltip
 from zulf_nmr.utils.visualization import plot_style
 from zulf_nmr.utils.visualization.awg_plotter import plot_awg
@@ -198,13 +197,6 @@ class AwgEditorPanel(ttk.Frame):
         ttk.Entry(params, textvariable=self._duration, width=10, font=theme.mono(10)).pack(side="left", padx=(6, 18))
         self._general = ttk.Label(params, text="", style="Card.TLabel", font=theme.mono(9))
         self._general.pack(side="left")
-        ttk.Label(left, text="Each channel is made of segments: a formula from t_start to t_stop (ms). An empty "
-                             "t_start is where the previous segment stops, an empty t_stop where the next one "
-                             "starts (or the end). t is the time after :AWG:RUN, tau the time from the start of "
-                             "the segment; the times in step, pulse, ramp, gauss, hann and chirp also count "
-                             "from the start of the segment. Outside the segments the channel is 0.",
-                  style="Card.TLabel", foreground=theme.MUTED, font=theme.sans(9), wraplength=760,
-                  justify="left").pack(side="top", anchor="w", pady=(8, 0))
 
         self._page = theme.ScrollPage(left, background=theme.PANEL, style="Card.TFrame")
         self._page.view.config(height=CHANNELS_HEIGHT_PX)
@@ -249,8 +241,6 @@ class AwgEditorPanel(ttk.Frame):
 
         preview = theme.card(self, padding=12)
         preview.pack(side="top", fill="both", expand=True, pady=(12, 0))
-        theme.caption(preview.body, "Preview - current in mA versus time after :AWG:RUN, as the AWG outputs it "
-                                    "(every sample held until the next)").pack(side="top", anchor="w")
         self._figure = Figure(figsize=(11, 6), layout="constrained")
         self._canvas = FigureCanvasTkAgg(self._figure, master=preview.body)
         toolbar = NavigationToolbar2Tk(self._canvas, preview.body, pack_toolbar=False)
@@ -258,6 +248,8 @@ class AwgEditorPanel(ttk.Frame):
         theme.style_toolbar(toolbar)
         toolbar.pack(side="bottom", fill="x")
         self._axis_drag = AxisDrag(self._canvas, toolbar)
+        Tooltip(self._canvas.get_tk_widget(), "Current in mA versus time after :AWG:RUN, as the AWG outputs it "
+                                              "(every sample held until the next)")
         theme.figure_widget(self._canvas).pack(side="top", fill="both", expand=True, pady=(6, 0))
 
     def _set_segments(self, channel: int, segments: list[Segment]) -> None:
@@ -286,15 +278,18 @@ class AwgEditorPanel(ttk.Frame):
             entry.bind("<FocusIn>", lambda _e, w=entry: setattr(self, "_active", w))
             entry._channel_entry = True
             self._entries.append(entry)
-            example = _EXAMPLES[channel] if r == 0 else "e.g. 100*sin(2*pi*1kHz*tau)"
-            ghost = GhostText(entry, example if example.startswith("e.g.") else f"e.g. {example}")
-            vars_.formula.trace_add("write", lambda *_, g=ghost: self.after_idle(g.update))
+            example = _EXAMPLES[channel] if r == 0 else "100*sin(2*pi*1kHz*tau)"
+            Tooltip(entry, f"Formula of the segment, e.g. {example}\n"
+                           "t: time after :AWG:RUN, tau: time from t_start; the times in step, pulse, ramp,\n"
+                           "gauss, hann and chirp count from t_start. Outside the segments the channel is 0.")
             theme.caption(frame, "t_start").grid(row=r, column=2, padx=(0, 4))
             start = ttk.Entry(frame, textvariable=vars_.start, width=8, font=theme.mono(10))
             start.grid(row=r, column=3)
+            Tooltip(start, "Start of the segment (ms); empty: where the previous segment stops")
             theme.caption(frame, "t_stop").grid(row=r, column=4, padx=(8, 4))
             stop = ttk.Entry(frame, textvariable=vars_.stop, width=8, font=theme.mono(10))
             stop.grid(row=r, column=5)
+            Tooltip(stop, "End of the segment (ms); empty: where the next segment starts, or the end")
             theme.caption(frame, "ms").grid(row=r, column=6, padx=(4, 6))
             remove = ttk.Button(frame, text="✕", style="Small.TButton", width=3,
                                 command=lambda c=channel, n=r: self._remove_segment(c, n))

@@ -10,6 +10,7 @@ from typing import Callable
 from zulf_nmr.experiment.parser import HardwareLimits
 from zulf_nmr.experiment.schedule import TIME_UNITS, QueueItem, format_delay, load_item, queue_errors
 from zulf_nmr.gui import theme
+from zulf_nmr.gui.tooltip import Tooltip
 
 
 def copy_items(items: list[QueueItem]) -> list[QueueItem]:
@@ -78,6 +79,8 @@ class QueuePanel(ttk.Frame):
         self._count = theme.Badge(head, "empty", theme.MUTED)
         self._count.pack(side="left", padx=10)
         self._review_btn = ttk.Button(head, text="Review sets  ▸", style="Accent.TButton", command=self._ok)
+        Tooltip(self._review_btn, "Sets run from top to bottom. Review shows every set; OK on the last one "
+                                  "accepts the queue for RUN.")
         self._review_btn.pack(side="right")
         self._buttons = [self._review_btn]
         for text, command in (("Clear", self._clear), ("Move down", lambda: self._move(1)),
@@ -88,9 +91,6 @@ class QueuePanel(ttk.Frame):
 
         hint = ttk.Frame(body, style="Card.TFrame")
         hint.pack(side="top", fill="x", pady=(6, 10))
-        ttk.Label(hint, text="Sets run from top to bottom. Review sets shows every set; OK on the last one "
-                             "accepts the queue for RUN.", style="Card.TLabel", foreground=theme.MUTED,
-                  font=theme.sans(9)).pack(side="left")
         self._lock_note = ttk.Label(hint, text="", style="Card.TLabel", foreground=theme.WARNING,
                                     font=theme.mono(9))
         self._lock_note.pack(side="right")
