@@ -885,14 +885,15 @@ class ResultsView(ttk.Frame):
 
     def show_saved(self, result: QueueResult) -> None:
         """Show the results of an earlier run, read back from its folder: every set's
-        transients (one row, closed, showing the first) and its average."""
+        transients (one open row, showing the last one) and its average."""
         n_transients = 0
         for group in result.groups:
             if group.transients:
                 browser = self._browser(group, len(group.transients[0].data), expanded=False)
                 for transient in group.transients:
                     browser.add(transient.number, transient.data, transient.file.name)
-                browser.show_number(group.transients[0].number)
+                browser.show_number(group.transients[-1].number)
+                browser.row.expand(True)
             count = len(group.transients)
             n_transients += count
             missing = (f" (only {count} of {group.expected_transients} saved)"

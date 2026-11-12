@@ -18,12 +18,12 @@ from matplotlib.figure import Figure
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 
 from zulf_nmr.gui import theme
+from zulf_nmr.gui.tooltip import Tooltip
 from zulf_nmr.utils.visualization import plot_style
 from zulf_nmr.utils.visualization.results_plotter import spectrum
 
-MAX_TRANSIENTS = 80
-POINTS = 120
-MAX_LINE_POINTS = 1500
+MAX_CELLS = 150_000
+MAX_LINE_POINTS = 600_000
 MODES = ("Signal", "Spectrum")
 STYLES = ("Mesh", "Surface", "Lines")
 COLOUR_MAPS = ("jet", "turbo", "viridis", "plasma")
@@ -58,7 +58,12 @@ def envelope(x: np.ndarray, y: np.ndarray, points: int) -> tuple[np.ndarray, np.
 
 class ThreeDView(ttk.Frame):
     """A tab with the 3D plot of one set's transients; "Draw" reads them again (also those
-    that arrived since)."""
+    that arrived since).
+
+    "Transients" and "Points" follow the data (all transients of the set, all samples or
+    frequencies in the range) until the user types a number; "Auto" makes them follow
+    again. A grid too big to turn smoothly (more than MAX_CELLS cells) is drawn with
+    fewer points, as the line above the plot says, unless "Full resolution" is ticked."""
 
     def __init__(self, parent: tk.Misc, transients: Callable[[], list[tuple[int, np.ndarray]]],
                  sample_rate_hz: float, channels: tuple[int, ...], start_s: float, title: str) -> None:
@@ -73,8 +78,11 @@ class ThreeDView(ttk.Frame):
         self._colours = tk.StringVar(value=COLOUR_MAPS[0])
         self._from = tk.StringVar()
         self._to = tk.StringVar()
-        self._max = tk.StringVar(value=str(MAX_TRANSIENTS))
-        self._points = tk.StringVar(value=str(POINTS))
+        self._max = tk.StringVar()
+        self._points = tk.StringVar()
+        self._full = tk.BooleanVar(value=False)
+        self._auto = True
+        self._filling = False
 
         bar = theme.card(self, padding=10)
         bar.pack(side="top", fill="x")
@@ -95,10 +103,25 @@ class ThreeDView(ttk.Frame):
         self._range_label.pack(side="left")
         for var in (self._from, self._to):
             ttk.Entry(controls, textvariable=var, width=8, font=theme.mono(9)).pack(side="left", padx=(4, 2))
-        theme.caption(controls, "Transients (max)").pack(side="left", padx=(12, 0))
-        ttk.Entry(controls, textvariable=self._max, width=5, font=theme.mono(9)).pack(side="left", padx=(4, 12))
-        theme.caption(controls, "Points per transient").pack(side="left")
-        ttk.Entry(controls, textvariable=self._points, width=5, font=theme.mono(9)).pack(side="left", padx=(4, 0))
+        theme.caption(controls, "Transients").pack(side="left", padx=(12, 0))
+        ttk.Entry(controls, textvariable=self._max, width=6, font=theme.mono(9)).pack(side="left", padx=(4, 2))
+        self._of_transients = ttk.Label(controls, text="", style="Card.TLabel", foreground=theme.MUTED,
+                                        font=theme.mono(8))
+        self._of_transients.pack(side="left", padx=(0, 12))
+        theme.caption(controls, "Points").pack(side="left")
+        ttk.Entry(controls, textvariable=self._points, width=7, font=theme.mono(9)).pack(side="left", padx=(4, 2))
+        self._of_points = ttk.Label(controls, text="", style="Card.TLabel", foreground=theme.MUTED,
+                                    font=theme.mono(8))
+        self._of_points.pack(side="left", padx=(0, 8))
+        auto = ttk.Button(controls, text="Auto", style="Small.TButton", command=self._set_auto)
+        auto.pack(side="left", padx=(0, 12))
+        Tooltip(auto, "All transients of the set and all points in the range")
+        full = ttk.Checkbutton(controls, text="Full resolution", variable=self._full, style="Card.TCheckbutton",
+                               command=self.draw)
+        full.pack(side="left")
+        Tooltip(full, "Draw every point even when the plot then turns slowly")
+        for var in (self._max, self._points):
+            var.trace_add("write", lambda *_: self._typed())
         for var in (self._channel, self._style, self._colours):
             var.trace_add("write", lambda *_: self.draw())
         self._mode.trace_add("write", lambda *_: self._mode_changed())
@@ -118,6 +141,33 @@ class ThreeDView(ttk.Frame):
 
     def restyle(self) -> None:
         self.draw()
+
+    def _typed(self) -> None:
+        if not self._filling:
+            self._auto = False
+
+    def _set_auto(self) -> None:
+        self._auto = True
+        self.draw()
+
+    def _set_fields(self, transients: int, points: int) -> None:
+        self._filling = True
+        self._max.set(str(transients))
+        self._points.set(str(points))
+        self._filling = False
+
+    def _available_points(self, data: np.ndarray) -> int:
+        """Samples (or frequencies) of one transient in the chosen range."""
+        signal = self._mode.get() == "Signal"
+        n = len(data)
+        xs = self._start_s + np.arange(n) / self._rate if signal else np.fft.rfftfreq(n, 1 / self._rate)
+        low, high = self._number(self._from.get(), None), self._number(self._to.get(), None)
+        keep = np.ones(len(xs), dtype=bool)
+        if low is not None:
+            keep &= xs >= low
+        if high is not None:
+            keep &= xs <= high
+        return int(keep.sum())
 
     def _mode_changed(self) -> None:
         self._range_label.config(text="Time (s)" if self._mode.get() == "Signal" else "Frequency (Hz)")
@@ -153,7 +203,7 @@ class ThreeDView(ttk.Frame):
                 keep &= xs <= high
             xs, ys = xs[keep], ys[keep]
             if self._style.get() == "Lines":
-                rows.append(envelope(xs, ys, MAX_LINE_POINTS))
+                rows.append(envelope(xs, ys, points))
                 continue
             xs, ys = binned(xs, ys, points, peak=not signal)
             if x is None:
@@ -181,13 +231,27 @@ class ThreeDView(ttk.Frame):
             axis._axinfo["grid"]["linewidth"] = 0.4
             axis._axinfo["grid"]["linestyle"] = ":"
         column = self._channel_numbers.index(int(self._channel.get()[2:])) if self._channel.get() else 0
-        most = max(int(self._number(self._max.get(), MAX_TRANSIENTS)), 2)
-        points = min(max(int(self._number(self._points.get(), POINTS)), 4), 2000)
+        style = self._style.get()
+        available_points = self._available_points(transients[0][1]) if transients else 0
+        if self._auto:
+            self._set_fields(len(transients), available_points)
+        self._of_transients.config(text=f"of {len(transients)}")
+        self._of_points.config(text=f"of {available_points}")
+        wanted_transients = min(max(int(self._number(self._max.get(), len(transients)) or 0), 1),
+                                max(len(transients), 1))
+        wanted_points = min(max(int(self._number(self._points.get(), available_points) or 0), 4),
+                            max(available_points, 4))
+        most, points = wanted_transients, wanted_points
+        budget = MAX_LINE_POINTS if style == "Lines" else MAX_CELLS
+        reduced = not self._full.get() and most * points > budget
+        if reduced:
+            points = max(budget // most, min(points, 50))
+            if most * points > budget:
+                most = max(budget // points, 2)
         step = max(1, int(np.ceil(len(transients) / most)))
         chosen = transients[::step]
-        style = self._style.get()
         if len(chosen) < (1 if style == "Lines" else 2):
-            self._info.config(text="Not enough complete transients in this set yet "
+            self._info.config(foreground=theme.MUTED, text="Not enough complete transients in this set yet "
                                    "(a mesh needs at least 2).")
             self._canvas.draw_idle()
             return
@@ -234,13 +298,16 @@ class ThreeDView(ttk.Frame):
                         pad=0.08).ax.tick_params(labelsize=7)
         figure.subplots_adjust(left=0, right=0.95, bottom=0, top=1)
         shown = f"every {step}. of {len(transients)}" if step > 1 else f"all {len(transients)}"
-        detail = "" if style == "Lines" else f", {len(x)} points each"
-        self._info.config(text=f"{self._channel.get()} · {len(numbers)} transient(s) ({shown}){detail} · "
-                               f"drag the plot to turn it, right-drag to zoom")
+        drawn_points = len(x) if style != "Lines" else max(len(xs) for xs, _ys in values)
+        note = (f" - fewer than the {wanted_transients} x {wanted_points} asked for, so that the plot turns "
+                f"smoothly (tick Full resolution for all)" if reduced else "")
+        self._info.config(text=f"{self._channel.get()} · {len(numbers)} transient(s) ({shown}) x {drawn_points} "
+                               f"points{note} · drag the plot to turn it, right-drag to zoom",
+                          foreground=theme.WARNING if reduced else theme.MUTED)
         self._canvas.draw_idle()
 
     def _nothing(self) -> None:
-        self._info.config(text="Nothing in the chosen range.")
+        self._info.config(text="Nothing in the chosen range.", foreground=theme.MUTED)
         self._canvas.draw_idle()
 
 
