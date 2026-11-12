@@ -9,10 +9,12 @@ from __future__ import annotations
 import ctypes
 import sys
 import tkinter as tk
+from typing import Callable
 from tkinter import font as tkfont
 from tkinter import ttk
 
 from matplotlib.backends.backend_tkagg import NavigationToolbar2Tk
+from PIL import Image, ImageDraw, ImageTk
 
 from zulf_nmr.utils.visualization import plot_style
 
@@ -21,6 +23,8 @@ THEMES = ("dark", "light")
 BACKGROUND = SURFACE = PANEL = RAISED = RAISED_HOVER = FIELD = BORDER = TEXT = NAV_TEXT = ""
 MUTED = DIM = ACCENT = ACCENT_HOVER = ACCENT_TEXT = ACCENT_SOFT = DANGER = DANGER_HOVER = ""
 DANGER_SOFT = OK = WARNING = INFO = SELECTION = ERROR_FIELD = CURSOR = SPAN = ""
+CLOSE_ICON_PX = 14
+_close_images: dict[str, ImageTk.PhotoImage] = {}
 _COLOUR_OPTIONS = ("background", "foreground", "highlightbackground", "highlightcolor", "activebackground",
                    "activeforeground", "selectcolor", "selectbackground", "selectforeground", "insertbackground",
                    "troughcolor", "disabledforeground")
@@ -68,6 +72,75 @@ def apply_theme(root: tk.Tk, name: str = "dark") -> None:
         style.theme_create(THEME_NAME, parent="clam")
     style.theme_use(THEME_NAME)
     _configure_styles(style)
+    _closable_tabs(root, style)
+
+
+def _close_icon(colour: str) -> Image.Image:
+    """A small "x" in colour on a transparent background (drawn 4x larger, then reduced)."""
+    big = CLOSE_ICON_PX * 4
+    image = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    margin, width = big * 0.28, max(big // 9, 1)
+    draw.line((margin, margin, big - margin, big - margin), fill=colour, width=width)
+    draw.line((margin, big - margin, big - margin, margin), fill=colour, width=width)
+    return image.resize((CLOSE_ICON_PX, CLOSE_ICON_PX), Image.LANCZOS)
+
+
+def _close_colours() -> dict[str, str]:
+    return {"normal": MUTED, "active": TEXT, "pressed": DANGER}
+
+
+def _closable_tabs(root: tk.Tk, style: ttk.Style) -> None:
+    """The style Closable.TNotebook: every tab has an "x" after its name (see
+    closable_notebook)."""
+    if _close_images:
+        for state, colour in _close_colours().items():
+            _close_images[state].paste(_close_icon(colour))
+        return
+    for state, colour in _close_colours().items():
+        _close_images[state] = ImageTk.PhotoImage(_close_icon(colour), master=root)
+    style.element_create("close", "image", _close_images["normal"],
+                         ("active", "pressed", "!disabled", _close_images["pressed"]),
+                         ("active", "!disabled", _close_images["active"]), border=6, sticky="")
+    style.layout("Closable.TNotebook", style.layout("TNotebook"))
+    style.layout("Closable.TNotebook.Tab", [
+        ("Notebook.tab", {"sticky": "nswe", "children": [
+            ("Notebook.padding", {"side": "top", "sticky": "nswe", "children": [
+                ("Notebook.focus", {"side": "top", "sticky": "nswe", "children": [
+                    ("Notebook.label", {"side": "left", "sticky": ""}),
+                    ("Notebook.close", {"side": "left", "sticky": ""}),
+                ]}),
+            ]}),
+        ]}),
+    ])
+
+
+def closable_notebook(parent: tk.Misc, on_close: Callable[[tk.Misc], None]) -> ttk.Notebook:
+    """A notebook whose tabs close with their "x": on_close(tab widget) is called when the
+    mouse is pressed and released on the same "x"."""
+    notebook = ttk.Notebook(parent, style="Closable.TNotebook")
+    pressed: list[int] = []
+
+    def press(event) -> str | None:
+        if "close" not in notebook.identify(event.x, event.y):
+            return None
+        pressed[:] = [notebook.index(f"@{event.x},{event.y}")]
+        notebook.state(["pressed"])
+        return "break"
+
+    def release(event) -> None:
+        if not notebook.instate(["pressed"]):
+            return
+        notebook.state(["!pressed"])
+        if not pressed:
+            return
+        index = pressed.pop()
+        if "close" in notebook.identify(event.x, event.y) and notebook.index(f"@{event.x},{event.y}") == index:
+            on_close(notebook.nametowidget(notebook.tabs()[index]))
+
+    notebook.bind("<ButtonPress-1>", press, add="+")
+    notebook.bind("<ButtonRelease-1>", release, add="+")
+    return notebook
 
 
 def switch(root: tk.Tk, name: str) -> None:
@@ -89,6 +162,7 @@ def switch(root: tk.Tk, name: str) -> None:
                 mapping.setdefault(a.lower(), new[key][k])
     _set_options(root)
     _configure_styles(ttk.Style(root))
+    _closable_tabs(root, ttk.Style(root))
     _recolor(root, mapping)
     title_bar(root)
 

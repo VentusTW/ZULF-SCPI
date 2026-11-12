@@ -53,7 +53,6 @@ class ReviewPanel(ttk.Frame):
     accepted=True (the whole queue is accepted) the sets can be stepped through instead."""
 
     def __init__(self, parent: tk.Misc, on_ok: Callable[[], None], on_exit: Callable[[], None],
-                 on_run: Callable[[], None], on_abort: Callable[[], None],
                  on_queue: Callable[[], None]) -> None:
         super().__init__(parent, padding=(18, 16, 18, 16))
         self._on_ok, self._on_exit = on_ok, on_exit
@@ -65,10 +64,10 @@ class ReviewPanel(ttk.Frame):
         self._figures: list[Figure] = []
         self._canvases: list[FigureCanvasTkAgg] = []
         self._cards: list[tk.Frame] = []
-        self._build(on_run, on_abort, on_queue)
+        self._build(on_queue)
         self.show_empty("No set to review yet. Build the queue and press Review sets.")
 
-    def _build(self, on_run, on_abort, on_queue) -> None:
+    def _build(self, on_queue) -> None:
         header = theme.card(self)
         header.pack(side="top", fill="x")
         body = header.body
@@ -82,8 +81,8 @@ class ReviewPanel(ttk.Frame):
         self._file.pack(side="left", padx=(10, 0))
         self._dash = ttk.Label(line, text="", style="Card.TLabel", foreground=theme.DIM, font=theme.sans(12))
         self._dash.pack(side="left", padx=6)
-        self._name = ttk.Label(line, text="", style="Card.TLabel", font=theme.sans(16, "bold"))
-        self._name.pack(side="left")
+        self._experiment = ttk.Label(line, text="", style="Card.TLabel", font=theme.sans(16, "bold"))
+        self._experiment.pack(side="left")
 
         badges = ttk.Frame(body, style="Card.TFrame")
         badges.grid(row=1, column=0, sticky="w", pady=(8, 6))
@@ -112,12 +111,6 @@ class ReviewPanel(ttk.Frame):
         self._next_btn = ttk.Button(top, text="Next set  ▶", command=lambda: self._browse(1))
         self._queue_btn = ttk.Button(top, text="Edit queue", command=on_queue)
         self._queue_btn.pack(side="right")
-        bottom = ttk.Frame(actions, style="Card.TFrame")
-        bottom.pack(side="top", anchor="e", pady=(8, 0))
-        self.run_btn = ttk.Button(bottom, text="▶  RUN QUEUE", style="Accent.TButton", width=16, command=on_run)
-        self.run_btn.pack(side="left")
-        self.abort_btn = ttk.Button(bottom, text="■  ABORT", style="Danger.TButton", width=10, command=on_abort)
-        self.abort_btn.pack(side="left", padx=(8, 0))
 
         footer = theme.card(self, padding=10)
         footer.pack(side="bottom", fill="x", pady=(12, 0))
@@ -147,9 +140,9 @@ class ReviewPanel(ttk.Frame):
         self._items, self._accepted = [], False
         self._clear_plots()
         self._set_badge.set("set –/–", theme.MUTED)
-        for label in (self._file, self._dash, self._name):
+        for label in (self._file, self._dash, self._experiment):
             label.config(text="")
-        self._name.config(text="Set review")
+        self._experiment.config(text="Set review")
         self._valid_badge.pack_forget()
         self._state_badge.pack_forget()
         for value in self._fact_values.values():
@@ -168,7 +161,7 @@ class ReviewPanel(ttk.Frame):
         self._set_badge.set(f"set {index + 1}/{total}", theme.ACCENT)
         self._file.config(text=item.path.name)
         self._dash.config(text="—")
-        self._name.config(text=config.experiment_name)
+        self._experiment.config(text=config.experiment_name)
         self._valid_badge.set("validated (ok)", theme.OK)
         self._valid_badge.pack(side="left")
         if accepted:
@@ -192,7 +185,7 @@ class ReviewPanel(ttk.Frame):
                   f"{awg.duration_s * 1000:g} ms") if awg is not None else "none")
 
         if accepted:
-            self._hint.config(text=f"All {total} set(s) accepted. Press RUN QUEUE to start the queue.")
+            self._hint.config(text=f"All {total} set(s) accepted. Press RUN QUEUE at the top to start the queue.")
         elif index < total - 1:
             self._hint.config(text=f"Set {index + 1}/{total}. Next set starts {format_delay(item.delay_s)} "
                                    f"after this one ends. Press OK to accept.")
@@ -212,10 +205,6 @@ class ReviewPanel(ttk.Frame):
         """While the queue runs, the review cannot be answered."""
         self._locked = locked
         self._update_buttons()
-
-    def set_run_state(self, can_run: bool, running: bool) -> None:
-        self.run_btn.config(state="normal" if can_run and not running else "disabled")
-        self.abort_btn.config(state="normal" if running else "disabled")
 
     def _update_buttons(self) -> None:
         reviewing = bool(self._items) and not self._accepted

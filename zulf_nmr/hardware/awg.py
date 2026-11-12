@@ -186,7 +186,7 @@ def load_awg_npz(
     missing = {"currents_A", "sample_rate_hz"} - arrays.keys()
     if missing:
         raise ValueError(f"{path}: missing array(s) {', '.join(sorted(missing))}")
-    unknown = arrays.keys() - {"currents_A", "sample_rate_hz", "ranges", "enable", "formulas", "duration_ms",
+    unknown = arrays.keys() - {"currents_A", "sample_rate_hz", "ranges", "enable", "formulas", "segments", "duration_ms",
                                "data_currents_A", "data_sample_rate_hz"}
     if unknown:
         raise ValueError(f"{path}: unknown array(s) {', '.join(sorted(unknown))}")

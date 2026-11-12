@@ -16,6 +16,7 @@ from matplotlib.widgets import SpanSelector
 
 from zulf_nmr.experiment.schedule import QueueResult, ResultGroup, Transient
 from zulf_nmr.gui import theme
+from zulf_nmr.gui.results_3d import ThreeDView
 from zulf_nmr.gui.tooltip import Tooltip
 from zulf_nmr.utils.visualization.results_plotter import (
     sample_range,
@@ -180,6 +181,14 @@ class TraceRow:
         self._toggle.config(text="+")
         if expanded:
             self.expand(True)
+
+    @property
+    def header(self) -> ttk.Frame:
+        return self._header
+
+    @property
+    def name_label(self) -> ttk.Label:
+        return self._name
 
     def set_size(self, width: int, height: int) -> None:
         """Size of the plots in pixels (the figure follows its widget)."""
@@ -649,14 +658,153 @@ class EdgeDialog(tk.Toplevel):
         self.bell()
 
 
-class ResultsView(ttk.Frame):
-    """One run in a tab. Rows top to bottom: set 1 transients, set 1 average, set 2...
-    Rows are added while the queue runs; the average row of a set is redrawn after every
-    transient."""
+class TransientBrowser:
+    """The single transients of one set in one row: "−" and "+" step through them, a
+    number can be typed (Enter), "Latest" follows the newest one while the queue runs.
 
-    def __init__(self, parent: tk.Misc, folder: Path, on_close=None) -> None:
+    The data of every transient are kept; only the one shown is drawn, in the row's
+    figure that is made once.
+    """
+
+    def __init__(self, master: tk.Misc, group: ResultGroup, total_samples: int, on_scroll,
+                 expanded: bool = True, on_3d=None) -> None:
+        self.set_index = group.set_index
+        self.group = group
+        self.expected = group.expected_transients
+        self.row = TraceRow(master, group.sample_rate_hz, group.channels, average=False,
+                            total_samples=total_samples, on_scroll=on_scroll, start_s=group.acquisition_start_s,
+                            expanded=expanded)
+        self._data: dict[int, tuple[np.ndarray, str]] = {}
+        self._live: tuple[int, np.ndarray, int] | None = None
+        self._shown: int | None = None
+        self.follow = True
+
+        picker = ttk.Frame(self.row.header, style="Card.TFrame")
+        picker.pack(side="left", padx=(4, 8), after=self.row.name_label)
+        theme.caption(picker, "Transient").pack(side="left", padx=(0, 6))
+        ttk.Button(picker, text="−", style="Small.TButton", width=3, command=lambda: self.step(-1)).pack(side="left")
+        self._number = tk.StringVar()
+        self._entry = ttk.Entry(picker, textvariable=self._number, width=6, font=theme.mono(10), justify="center")
+        self._entry.pack(side="left", padx=4)
+        self._entry.bind("<Return>", lambda _e: self._typed())
+        self._entry.bind("<KP_Enter>", lambda _e: self._typed())
+        ttk.Button(picker, text="+", style="Small.TButton", width=3, command=lambda: self.step(1)).pack(side="left")
+        self._of = ttk.Label(picker, text="", style="Card.TLabel", foreground=theme.MUTED, font=theme.mono(9))
+        self._of.pack(side="left", padx=(6, 6))
+        self._latest = ttk.Button(picker, text="Latest", style="Small.TButton", command=self.follow_latest)
+        self._latest.pack(side="left")
+        Tooltip(self._latest, "Show the newest transient, and keep following it while the queue runs")
+        if on_3d is not None:
+            three_d = ttk.Button(picker, text="3D", style="Small.TButton", command=lambda: on_3d(self))
+            three_d.pack(side="left", padx=(6, 0))
+            Tooltip(three_d, "Experimental: all transients of this set in one 3D plot (transient number on z)")
+        Tooltip(self._entry, "Type a transient number and press Enter")
+        for widget in (picker, *picker.winfo_children()):
+            widget.bind("<MouseWheel>", lambda e: on_scroll and on_scroll(e.delta / 120), add="+")
+        self._update_picker()
+
+    def complete(self) -> list[tuple[int, np.ndarray]]:
+        """(number, data) of every complete transient, in order."""
+        return [(n, self._data[n][0]) for n in sorted(self._data)]
+
+    def numbers(self) -> list[int]:
+        """The transients that can be shown: the saved ones and the one being acquired."""
+        numbers = set(self._data)
+        if self._live is not None:
+            numbers.add(self._live[0])
+        return sorted(numbers)
+
+    def add(self, number: int, data: np.ndarray, file_name: str) -> None:
+        """A complete transient."""
+        self._data[number] = (data, file_name)
+        if self._live is not None and self._live[0] == number:
+            self._live = None
+        if self.follow or self._shown == number or self._shown is None:
+            self._show(number)
+        else:
+            self._update_picker()
+
+    def live(self, number: int, data: np.ndarray, total_samples: int) -> None:
+        """A transient still being acquired (data = samples received so far)."""
+        self._live = (number, data, total_samples)
+        if self.follow or self._shown == number:
+            self._show(number)
+        else:
+            self._update_picker()
+
+    def step(self, direction: int) -> None:
+        numbers = self.numbers()
+        if not numbers:
+            return
+        current = self._shown if self._shown is not None else numbers[-1]
+        later = [n for n in numbers if (n > current if direction > 0 else n < current)]
+        if later:
+            self.follow = False
+            self._show(later[0] if direction > 0 else later[-1])
+
+    def follow_latest(self) -> None:
+        self.follow = True
+        numbers = self.numbers()
+        if numbers:
+            self._show(numbers[-1])
+
+    def show_number(self, number: int) -> bool:
+        """Show transient number; False if there is no such transient (yet)."""
+        if number not in self.numbers():
+            return False
+        self.follow = False
+        self._show(number)
+        return True
+
+    def _typed(self) -> None:
+        text = self._number.get().strip()
+        if not (text.isdigit() and self.show_number(int(text))):
+            self._entry.config(style="Error.TEntry")
+            self._entry.after(900, self._end_error)
+            self._entry.bell()
+
+    def _end_error(self) -> None:
+        """After a number that is not there: the field shows the transient on view again."""
+        if self._entry.winfo_exists():
+            self._entry.config(style="TEntry")
+            if self._shown is not None:
+                self._number.set(str(self._shown))
+
+    def _show(self, number: int) -> None:
+        self._shown = number
+        head = f"Set {self.set_index}: transient {number:03d} of {self.expected}"
+        if self._live is not None and self._live[0] == number:
+            _, data, total = self._live
+            percent = 100 * len(data) // total if total else 0
+            self.row.show(data, f"{head}\nacquiring... {len(data)}/{total} samples ({percent}%)", live=True)
+        elif number in self._data:
+            data, file_name = self._data[number]
+            self.row.show(data, f"{head}\n{file_name}")
+        self._update_picker()
+
+    def _update_picker(self) -> None:
+        if self._shown is not None and self.root_focus() is not self._entry:
+            self._number.set(str(self._shown))
+        saved = len(self._data)
+        self._of.config(text=f"of {self.expected}" + (f"  ({saved} saved)" if saved < self.expected else ""))
+        self._latest.state(["pressed"] if self.follow else ["!pressed"])
+
+    def root_focus(self):
+        try:
+            return self._entry.focus_get()
+        except (KeyError, tk.TclError):
+            return None
+
+
+class ResultsView(ttk.Frame):
+    """One run in a tab. Two rows per set, top to bottom: its single transients (one
+    row, browsed by number) and its average; then set 2... Rows are added while the
+    queue runs; the average row of a set is redrawn after every transient."""
+
+    def __init__(self, parent: tk.Misc, folder: Path, on_3d=None) -> None:
         super().__init__(parent, padding=(0, 10, 0, 0))
         self.folder = folder
+        self._on_3d = on_3d
         dpi = self.winfo_fpixels("1i")
         self._row_px = [int(ROW_SIZE_IN[0] * dpi), int(ROW_SIZE_IN[1] * dpi)]
 
@@ -665,8 +813,6 @@ class ResultsView(ttk.Frame):
         theme.caption(bottom.body, "Folder").pack(side="left")
         ttk.Label(bottom.body, text=str(folder), style="Card.TLabel", foreground=theme.ACCENT,
                   font=theme.mono(9)).pack(side="left", padx=(6, 16))
-        ttk.Button(bottom.body, text="Close tab", style="Small.TButton",
-                   command=on_close or self.destroy).pack(side="right")
         self._progress_text = ttk.Label(bottom.body, text="", style="Card.TLabel", foreground=theme.MUTED,
                                         font=theme.mono(9))
         self._progress_text.pack(side="right")
@@ -687,22 +833,26 @@ class ResultsView(ttk.Frame):
         self._inner.bind("<MouseWheel>", self._on_wheel)
 
         self._averages: dict[int, TraceRow] = {}
-        self._rows: dict[tuple[int, int], TraceRow] = {}
+        self._browsers: dict[int, TransientBrowser] = {}
         self._complete: dict[int, tuple[np.ndarray, int]] = {}
         self._average_drawn: dict[int, float] = {}
 
     def restyle(self) -> None:
-        for row in (*self._rows.values(), *self._averages.values()):
+        for row in self._all_rows():
             row.restyle()
+
+    def _all_rows(self) -> list[TraceRow]:
+        return [*(b.row for b in self._browsers.values()), *self._averages.values()]
+
+    def browser(self, set_index: int) -> TransientBrowser | None:
+        return self._browsers.get(set_index)
 
     def show_live(self, group: ResultGroup, number: int, data: np.ndarray, total_samples: int) -> None:
         """Draw a transient that is still being acquired (data = samples received so far)
         and the set's average with it, so the average is shown from the very start."""
         follow = self._at_bottom()
-        row = self._row(group, number, total_samples)
+        self._browser(group, total_samples).live(number, data, total_samples)
         percent = 100 * len(data) // total_samples if total_samples else 0
-        row.show(data, f"Set {group.set_index}: transient {number:03d} of {group.expected_transients}"
-                       f"\nacquiring... {len(data)}/{total_samples} samples ({percent}%)", live=True)
 
         complete, count = self._complete.get(group.set_index, (None, 0))
         now = time.monotonic()
@@ -722,12 +872,10 @@ class ResultsView(ttk.Frame):
         self._follow(follow)
 
     def add_transient(self, group: ResultGroup, transient: Transient, average_data: np.ndarray, count: int) -> None:
-        """Show a complete transient (in its live row, or a new one above its set's average),
-        then redraw the average (average_data = the mean of the set's first count transients)."""
+        """Add a complete transient to its set's transients row, then redraw the average
+        (average_data = the mean of the set's first count transients)."""
         follow = self._at_bottom()
-        row = self._row(group, transient.number, len(transient.data))
-        row.show(transient.data, f"Set {group.set_index}: transient {transient.number:03d} of "
-                                 f"{group.expected_transients}\n{transient.file.name}")
+        self._browser(group, len(transient.data)).add(transient.number, transient.data, transient.file.name)
         self._complete[group.set_index] = (average_data, count)
         average = self._average_row(group, len(average_data))
         of = "" if count == group.expected_transients else f" (so far {count} of {group.expected_transients})"
@@ -737,13 +885,14 @@ class ResultsView(ttk.Frame):
 
     def show_saved(self, result: QueueResult) -> None:
         """Show the results of an earlier run, read back from its folder: every set's
-        transients, then its average."""
+        transients (one row, closed, showing the first) and its average."""
         n_transients = 0
         for group in result.groups:
-            for transient in group.transients:
-                row = self._row(group, transient.number, len(transient.data), expanded=False)
-                row.show(transient.data, f"Set {group.set_index}: transient {transient.number:03d} of "
-                                         f"{group.expected_transients}\n{transient.file.name}")
+            if group.transients:
+                browser = self._browser(group, len(group.transients[0].data), expanded=False)
+                for transient in group.transients:
+                    browser.add(transient.number, transient.data, transient.file.name)
+                browser.show_number(group.transients[0].number)
             count = len(group.transients)
             n_transients += count
             missing = (f" (only {count} of {group.expected_transients} saved)"
@@ -758,25 +907,20 @@ class ResultsView(ttk.Frame):
     def set_status(self, text: str) -> None:
         self._progress_text.config(text=text)
 
-    def _row(self, group: ResultGroup, number: int, total_samples: int, expanded: bool = True) -> TraceRow:
-        """The row of a transient, created (above the set's average, if there is one) when needed.
-
-        A new open row closes the rows of the earlier transients (only their names stay),
-        so while the queue runs just the transient being drawn and the averages are open.
-        """
-        key = (group.set_index, number)
-        row = self._rows.get(key)
-        if row is None:
+    def _browser(self, group: ResultGroup, total_samples: int, expanded: bool = True) -> TransientBrowser:
+        """The transients row of a set, created (above the set's average, if there is one)
+        when needed. A new open one closes those of the earlier sets."""
+        browser = self._browsers.get(group.set_index)
+        if browser is None:
             if expanded:
-                for other in self._rows.values():
-                    other.expand(False)
-            row = self._rows[key] = TraceRow(self._inner, group.sample_rate_hz, group.channels,
-                                             average=False, total_samples=total_samples,
-                                             on_scroll=self._scroll, start_s=group.acquisition_start_s,
-                                             expanded=expanded)
+                for other in self._browsers.values():
+                    other.row.expand(False)
+            browser = self._browsers[group.set_index] = TransientBrowser(
+                self._inner, group, total_samples, self._scroll, expanded=expanded,
+                on_3d=self._on_3d and (lambda b: self._on_3d(self, b)))
             average = self._averages.get(group.set_index)
-            self._pack(row, before=average.frame if average else None)
-        return row
+            self._pack(browser.row, before=average.frame if average else None)
+        return browser
 
     def _average_row(self, group: ResultGroup, total_samples: int) -> TraceRow:
         """The average row of a set, created below its transients when needed."""
@@ -804,7 +948,7 @@ class ResultsView(ttk.Frame):
             return
         self._row_px[0] = width
         self._view.itemconfigure(self._inner_id, width=event.width)
-        for row in (*self._rows.values(), *self._averages.values()):
+        for row in self._all_rows():
             row.set_size(*self._row_px)
 
     def _pack(self, row: TraceRow, before: tk.Widget | None = None) -> None:
@@ -835,13 +979,14 @@ class ResultsPanel(ttk.Frame):
         ttk.Label(head.body, text="Ctrl + wheel: zoom   Shift + wheel: pan   drag: spectrum range",
                   style="Card.TLabel", foreground=theme.MUTED, font=theme.mono(8)).pack(side="right", padx=16)
 
-        self._tabs = ttk.Notebook(self)
+        self._tabs = theme.closable_notebook(self, self.close)
         self._empty = ttk.Frame(self)
         ttk.Label(self._empty, text="No results open.\n\nRun the queue to see every transient live, "
                                     "or load the folder of an earlier run.",
                   foreground=theme.MUTED, font=theme.sans(11), justify="center").pack(pady=(80, 16))
         ttk.Button(self._empty, text="Load results…", style="Accent.TButton", command=on_load).pack()
         self._views: list[ResultsView] = []
+        self._plots: list[ThreeDView] = []
         self._update()
 
     @property
@@ -850,7 +995,7 @@ class ResultsPanel(ttk.Frame):
 
     def new_view(self, folder: Path, title: str) -> ResultsView:
         """A new tab, shown at once."""
-        view = ResultsView(self._tabs, folder, on_close=lambda: self.close(view))
+        view = ResultsView(self._tabs, folder, on_3d=self.open_3d)
         self._views.append(view)
         self._tabs.add(view, text=title)
         self._tabs.select(view)
@@ -858,24 +1003,39 @@ class ResultsPanel(ttk.Frame):
         return view
 
     def restyle(self) -> None:
-        for view in self._views:
+        for view in (*self._views, *self._plots):
             view.restyle()
+
+    def open_3d(self, view: ResultsView, browser: TransientBrowser) -> ThreeDView:
+        """A new tab with the 3D plot of one set's transients."""
+        group = browser.group
+        title = f"3D · set {group.set_index} · {view.folder.name}"
+        plot = ThreeDView(self._tabs, browser.complete, group.sample_rate_hz, group.channels,
+                          group.acquisition_start_s, title)
+        self._plots.append(plot)
+        self._tabs.add(plot, text=title)
+        self._tabs.select(plot)
+        self._update()
+        return plot
 
     def rename(self, view: ResultsView, title: str) -> None:
         if view in self._views:
             self._tabs.tab(view, text=title)
 
-    def close(self, view: ResultsView) -> None:
-        if view in self._views:
-            self._views.remove(view)
-            self._tabs.forget(view)
-            view.destroy()
-            self._update()
+    def close(self, tab: tk.Misc) -> None:
+        """Close a tab (a run or a 3D plot)."""
+        for tabs in (self._views, self._plots):
+            if tab in tabs:
+                tabs.remove(tab)
+                self._tabs.forget(tab)
+                tab.destroy()
+                self._update()
+                return
 
     def _update(self) -> None:
         n = len(self._views)
         self._count.set(f"{n} run(s) open" if n else "no runs open", theme.ACCENT if n else theme.MUTED)
-        if n:
+        if n or self._plots:
             self._empty.pack_forget()
             self._tabs.pack(side="top", fill="both", expand=True, pady=(12, 0))
         else:

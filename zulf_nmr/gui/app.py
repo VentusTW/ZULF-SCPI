@@ -39,6 +39,7 @@ from zulf_nmr.gui.console_panel import MAX_SAVED_HISTORY, ConsolePanel
 from zulf_nmr.gui.queue_editor import QueuePanel
 from zulf_nmr.gui.results_viewer import ResultsPanel, ResultsView
 from zulf_nmr.gui.review import ReviewPanel
+from zulf_nmr.gui.sequence_editor import SequenceEditorPanel
 from zulf_nmr.gui.system_panel import SystemPanel
 from zulf_nmr.gui.tooltip import Tooltip
 from zulf_nmr.version import version_text
@@ -64,6 +65,7 @@ _SIDEBAR_PX = 250
 PANELS = (
     ("console", "Terminal & SCPI", "›_"),
     ("queue", "Experiment queue", "≡"),
+    ("sequence", "Sequence editor", "▥"),
     ("review", "Set review", "✓"),
     ("results", "Results", "▤"),
     ("awg", "AWG generator", "≈"),
@@ -204,13 +206,12 @@ class App(tk.Tk):
                                        initial_dir=DEFAULT_SYSTEM_CONFIG.parent.parent / "data",
                                        on_review=self._start_review, on_changed=self._queue_edited)
         self._review = ReviewPanel(self._content, on_ok=self._review_ok, on_exit=self._review_exit,
-                                   on_run=self._start_run, on_abort=self._abort,
                                    on_queue=lambda: self.show_panel("queue"))
         self._results = ResultsPanel(self._content, on_load=self._load_results)
         self._system_panel = SystemPanel(self._content, results_dir=self._results_dir,
                                          on_load_connection=self._load_connection_file)
         self._panels = {"console": self._console, "queue": self._queue_panel, "review": self._review,
-                        "results": self._results, "awg": None, "system": self._system_panel}
+                        "results": self._results, "awg": None, "sequence": None, "system": self._system_panel}
         for number, (name, _text, _icon) in enumerate(PANELS, start=1):
             self.bind_all(f"<Control-Key-{number}>", lambda _e, n=name: self.show_panel(n))
         self.bind_all("<Control-Key-b>", lambda _e: self._toggle_sidebar())
@@ -299,7 +300,7 @@ class App(tk.Tk):
         self._progress_label = ttk.Label(bar, text="Ready", style="Surface.TLabel", foreground=theme.MUTED,
                                          font=theme.mono(9))
         self._progress_label.pack(side="left")
-        ttk.Label(bar, text="Ctrl+1…6 switch consoles   Ctrl+B menu", style="Surface.TLabel", foreground=theme.DIM,
+        ttk.Label(bar, text="Ctrl+1…7 switch consoles   Ctrl+B menu", style="Surface.TLabel", foreground=theme.DIM,
                   font=theme.mono(8)).pack(side="right")
         self._progress_bar = ttk.Progressbar(bar, length=260, mode="determinate")
         self._progress_bar.pack(side="right", padx=(0, 18))
@@ -312,6 +313,11 @@ class App(tk.Tk):
         panel = self._panels.get(name)
         if panel is None and name == "awg":
             panel = self._panels["awg"] = self._build_awg_editor()
+        if panel is None and name == "sequence":
+            panel = self._panels["sequence"] = SequenceEditorPanel(
+                self._content, lambda: self._system, DEFAULT_SYSTEM_CONFIG.parent.parent / "data",
+                on_saved=lambda path: self._log("info", f"Experiment file saved: {path}"),
+                on_add_to_queue=self._add_to_queue)
         if self._current is not None and self._panels.get(self._current) is not None:
             self._panels[self._current].pack_forget()
         panel.pack(fill="both", expand=True)
@@ -379,8 +385,9 @@ class App(tk.Tk):
         theme.switch(self, "light" if theme.current() == "dark" else "dark")
         self._show_theme_button()
         self._review.restyle()
-        if self._panels.get("awg") is not None:
-            self._panels["awg"].restyle()
+        for name in ("awg", "sequence"):
+            if self._panels.get(name) is not None:
+                self._panels[name].restyle()
         self._results.restyle()
         self._last_connected = None
         self._poll_status(reschedule=False)
@@ -512,6 +519,15 @@ class App(tk.Tk):
         self._system_panel.show(system, self._system_note)
         self._connect()
 
+    def _add_to_queue(self, path: Path) -> None:
+        """An experiment file from the sequence editor goes to the end of the queue."""
+        if self._runner is not None:
+            self._log("error", "The queue is running - abort it before changing it")
+            return
+        self._queue_panel.add_files([path])
+        self._log("info", f"{path.name} added to the queue - review the sets to accept it")
+        self.show_panel("queue")
+
     def _start_review(self, items: list[QueueItem]) -> None:
         """Show every set of the queue in turn; OK on the last one accepts the queue."""
         if self._runner is not None:
@@ -572,7 +588,6 @@ class App(tk.Tk):
         can_run = self._queue_accepted and (self._simulate.get() or self._is_connected())
         self._run_btn.config(state="normal" if can_run and not running else "disabled")
         self._abort_btn.config(state="normal" if running else "disabled")
-        self._review.set_run_state(can_run, running)
         self._refresh_state()
 
     def _refresh_state(self) -> None:

@@ -5,12 +5,14 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+import numpy as np
 from matplotlib.figure import Figure, SubFigure
 
 from zulf_nmr.hardware.awg import RANGE_FULL_SCALE_A, AwgRange, AwgWaveform, load_awg_npz
 from zulf_nmr.utils.visualization import plot_style
 
 _Y_MARGIN = 0.1
+MARKER_SAMPLES = 80
 
 
 def _y_range(values_mA, full_scale_mA: float) -> tuple[float, float]:
@@ -21,6 +23,13 @@ def _y_range(values_mA, full_scale_mA: float) -> tuple[float, float]:
         return -1.1 * full_scale_mA, 1.1 * full_scale_mA
     margin = _Y_MARGIN * (high - low)
     return low - margin, high + margin
+
+
+def _show_samples(ax, dots, t_ms: np.ndarray) -> None:
+    """Dots on the samples only when few of them are in view."""
+    low, high = sorted(ax.get_xlim())
+    in_view = int(np.searchsorted(t_ms, high, "right") - np.searchsorted(t_ms, low, "left"))
+    dots.set_visible(in_view <= MARKER_SAMPLES)
 
 
 def plot_awg(
@@ -36,6 +45,10 @@ def plot_awg(
     its start and end; the time axis shows the whole waveform and the start of the
     acquisition (zoom out to see a longer acquisition to its end). show_title=False
     leaves out the title (for a panel that shows it itself).
+
+    The curves are drawn as the AWG outputs them: every sample is held until the next
+    one (steps), the last one until the end of the sequence. When at most
+    MARKER_SAMPLES samples are in view, dots mark the samples themselves.
     """
     if fig is None:
         import matplotlib.pyplot as plt
@@ -57,7 +70,10 @@ def plot_awg(
         colour = plot_style.series(ch - 1)
         full_scale_mA = RANGE_FULL_SCALE_A[range_] * 1000
         values_mA = waveform.currents_A[:, ch - 1] * 1000
-        ax.plot(t_ms, values_mA, color=colour, linewidth=1.4, solid_joinstyle="round", antialiased=True)
+        ax.plot(np.append(t_ms, awg_end), np.append(values_mA, values_mA[-1:]), drawstyle="steps-post",
+                color=colour, linewidth=1.4, antialiased=True)
+        (dots,) = ax.plot(t_ms, values_mA, "o", color=colour, markersize=4, visible=False)
+        ax.callbacks.connect("xlim_changed", lambda ax_, d=dots: _show_samples(ax_, d, t_ms))
         ax.axhline(0, color=plot_style.GUIDE, linewidth=0.8, zorder=0)
         ax.set_ylim(*_y_range(values_mA, full_scale_mA))
         range_name = "LOW" if range_ == AwgRange.LOW else "HIGH"

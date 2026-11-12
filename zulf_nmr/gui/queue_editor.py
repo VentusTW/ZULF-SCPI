@@ -46,6 +46,15 @@ class QueuePanel(ttk.Frame):
         if self._items:
             self._select(0)
 
+    def add_files(self, paths: list[str | Path]) -> None:
+        """Add experiment files at the end of the queue (each one validated)."""
+        for path in paths:
+            self._items.append(load_item(path, self._limits))
+        self._refresh()
+        if self._items:
+            self._select(len(self._items) - 1)
+        self._on_changed()
+
     def set_limits(self, limits: HardwareLimits) -> None:
         self._limits = limits
 

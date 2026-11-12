@@ -2,6 +2,12 @@
 
 A formula gives the current of one channel in mA as a function of the time t in
 seconds after :AWG:RUN, e.g. "200 * pulse(5*ms, 15*ms)" or "5 * sin(2*pi*300*t)".
+A channel can be made of segments (piecewise): each segment has its own formula and
+its start and stop time (an empty start continues the previous segment, an empty stop
+runs to the next one); tau is the time from the start of the segment, and the times
+given to the shapes (step, pulse, ramp, gauss, hann, chirp) count from it too, e.g.
+pulse(15*ms, 30*ms) in a segment starting at 16 ms is on from 31 to 46 ms. Outside all
+segments the channel is 0.
 data(n) is channel n of an opened .npz file (SourceData), so files without
 formulas can be edited too, e.g. "0.5 * data(1) + 3 * sin(2*pi*50*t)".
 Only numbers, the names in NAMES, arithmetic, comparisons and calls of the
@@ -12,8 +18,9 @@ so it cannot run any other Python code.
 from __future__ import annotations
 
 import ast
+import json
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
@@ -106,7 +113,7 @@ def normalise(text: str) -> str:
 
 SHAPES = ("step", "pulse", "ramp", "gauss", "hann", "chirp")
 ARITY = {"min": 2, "max": 2, "root": 2, "step": 1, "pulse": 2, "ramp": 2, "gauss": 2, "hann": 2, "chirp": 4, "data": 1}
-NAMES = ("t", *CONSTANTS, *MATH, *SHAPES, "data")
+NAMES = ("t", "tau", *CONSTANTS, *MATH, *SHAPES, "data")
 
 
 @dataclass(frozen=True)
@@ -176,8 +183,11 @@ def check_formula(text: str) -> ast.Expression:
     return tree
 
 
-def evaluate_formula(text: str, t: np.ndarray, source: SourceData | None = None) -> np.ndarray:
-    """Values of a formula (mA) at the times t (s); an empty formula is 0."""
+def evaluate_formula(text: str, t: np.ndarray, source: SourceData | None = None,
+                     tau: np.ndarray | None = None) -> np.ndarray:
+    """Values of a formula (mA) at the times t (s); an empty formula is 0. tau is the
+    time from the start of the segment (t when not given); the shapes take their times
+    from the start of the segment as well."""
     if not text.strip():
         return np.zeros_like(t)
     tree = check_formula(text)
@@ -187,7 +197,7 @@ def evaluate_formula(text: str, t: np.ndarray, source: SourceData | None = None)
             raise FormulaError("data() needs a file - open one with Open...")
         return source.channel(n, t)
 
-    names = {"t": t, **CONSTANTS, **MATH, "root": lambda x, n: root(x, n, t), **_shapes(t), "data": data}
+    names = {"t": t, "tau": t if tau is None else tau, **CONSTANTS, **MATH, "root": lambda x, n: root(x, n, t), **_shapes(t if tau is None else tau), "data": data}
     try:
         with np.errstate(all="ignore"):
             value = eval(compile(tree, "<formula>", "eval"), {"__builtins__": {}}, names)
@@ -206,9 +216,110 @@ def evaluate_formula(text: str, t: np.ndarray, source: SourceData | None = None)
 
 
 @dataclass
-class ChannelFormula:
+class Segment:
+    """One piece of a channel: formula from start_ms to stop_ms (text as typed; an empty
+    start is 0, an empty stop is the end of the sequence)."""
+
     formula: str = ""
+    start_ms: str = ""
+    stop_ms: str = ""
+
+
+@dataclass
+class ChannelFormula:
+    segments: list[Segment] = field(default_factory=lambda: [Segment()])
     range_: AwgRange = AwgRange.HIGH
+
+    @classmethod
+    def single(cls, formula: str, range_: AwgRange = AwgRange.HIGH) -> ChannelFormula:
+        """One segment over the whole sequence."""
+        return cls([Segment(formula)], range_)
+
+    @property
+    def formula(self) -> str:
+        """The formula of a channel with one segment over the whole sequence, else ""."""
+        if len(self.segments) == 1 and not (self.segments[0].start_ms.strip() or self.segments[0].stop_ms.strip()):
+            return self.segments[0].formula
+        return ""
+
+    def uses_data(self) -> bool:
+        return any("data" in s.formula for s in self.segments)
+
+
+def _bound_ms(text: str, default: float, what: str) -> float:
+    text = text.strip().replace(",", ".")
+    if not text:
+        return default
+    try:
+        return float(text)
+    except ValueError:
+        raise FormulaError(f"{what} {text!r} is not a number of ms") from None
+
+
+def evaluate_channel(channel: ChannelFormula, t: np.ndarray, duration_ms: float,
+                     source: SourceData | None = None) -> np.ndarray:
+    """Values (mA) of a channel at the times t (s): every segment's formula in its time
+    range, 0 outside them. Segments must lie within 0..duration_ms and not overlap.
+
+    An empty start is where the previous segment stops (0 for the first); an empty stop
+    is where the next segment starts, if that is given, else the end of the sequence."""
+    values = np.zeros_like(t)
+    ranges: list[tuple[float, float, int]] = []
+    segments = channel.segments
+    many = len(segments) > 1
+    previous_stop = 0.0
+    for number, segment in enumerate(segments, start=1):
+        label = f"segment {number}: " if many else ""
+        try:
+            start = _bound_ms(segment.start_ms, previous_stop, "start")
+            next_start = duration_ms
+            if number < len(segments) and segments[number].start_ms.strip():
+                next_start = _bound_ms(segments[number].start_ms, duration_ms, "start of the next segment")
+            stop = _bound_ms(segment.stop_ms, next_start, "stop")
+            previous_stop = stop
+            if not segment.start_ms.strip() and number > 1 and start >= duration_ms:
+                raise FormulaError("type t_start - the previous segment already lasts to the end")
+            if start < 0:
+                raise FormulaError(f"start {start:g} ms is before 0")
+            if stop > duration_ms + 1e-9:
+                raise FormulaError(f"stop {stop:g} ms is after the end of the sequence ({duration_ms:g} ms)")
+            if stop <= start:
+                raise FormulaError(f"stop {stop:g} ms must be after start {start:g} ms")
+            for other_start, other_stop, other in ranges:
+                if start < other_stop and other_start < stop:
+                    raise FormulaError(f"{start:g}-{stop:g} ms overlaps segment {other} "
+                                       f"({other_start:g}-{other_stop:g} ms)")
+            ranges.append((start, stop, number))
+            inside = (t >= start / 1000 - 1e-12) & (t < stop / 1000 - 1e-12)
+            if inside.any() and segment.formula.strip():
+                values[inside] = evaluate_formula(segment.formula, t[inside], source, t[inside] - start / 1000)
+            elif segment.formula.strip():
+                check_formula(segment.formula)
+        except FormulaError as e:
+            raise FormulaError(f"{label}{e}") from None
+    return values
+
+
+def segments_json(channels: list[ChannelFormula]) -> str:
+    return json.dumps([[[s.formula, s.start_ms, s.stop_ms] for s in ch.segments] for ch in channels])
+
+
+def segments_from_json(text: str) -> list[list[Segment]]:
+    """Segments of every channel from segments_json(); raises ValueError if damaged."""
+    data = json.loads(text)
+    if not isinstance(data, list):
+        raise ValueError("segments: not a list")
+    channels = []
+    for channel in data:
+        if not isinstance(channel, list) or not channel:
+            raise ValueError("segments: a channel without segments")
+        segments = []
+        for item in channel:
+            if not (isinstance(item, list) and len(item) == 3 and all(isinstance(x, str) for x in item)):
+                raise ValueError("segments: damaged segment")
+            segments.append(Segment(*item))
+        channels.append(segments)
+    return channels
 
 
 def sample_times(sample_rate_hz: float, duration_ms: float) -> np.ndarray:
@@ -250,7 +361,7 @@ def build_waveform(
     currents = np.zeros((len(t), N_CHANNELS))
     for i, ch in enumerate(channels):
         try:
-            values_mA = evaluate_formula(ch.formula, t, source)
+            values_mA = evaluate_channel(ch, t, duration_ms, source)
         except FormulaError as e:
             channel_errors[i] = str(e)
             continue
@@ -275,14 +386,15 @@ def save_waveform(path: str | Path, waveform: AwgWaveform, channels: list[Channe
     experiment will accept it."""
     path = Path(path)
     extra = {}
-    if source is not None and any("data" in ch.formula for ch in channels):
+    if source is not None and any(ch.uses_data() for ch in channels):
         extra = {"data_currents_A": source.currents_mA / 1000, "data_sample_rate_hz": source.sample_rate_hz}
     np.savez(
         path,
         currents_A=waveform.currents_A,
         sample_rate_hz=waveform.sample_rate_hz,
         ranges=np.array([int(r) for r in waveform.ranges]),
-        formulas=np.array([ch.formula for ch in channels]),
+        formulas=np.array([ch.segments[0].formula for ch in channels]),
+        segments=np.array(segments_json(channels)),
         duration_ms=float(duration_ms),
         **extra,
     )
@@ -302,6 +414,12 @@ def open_for_editing(path: str | Path, max_sample_rate_hz: float = 10000, max_am
         files = set(data.files)
         if "formulas" in files:
             formulas = [str(f) for f in data["formulas"]]
+            pieces = [[Segment(f)] for f in formulas]
+            if "segments" in files:
+                try:
+                    pieces = segments_from_json(str(data["segments"]))
+                except ValueError:
+                    pass
             ranges = data["ranges"] if "ranges" in files else [AwgRange.HIGH] * N_CHANNELS
             rate = float(data["sample_rate_hz"])
             duration = (float(data["duration_ms"]) if "duration_ms" in files
@@ -310,9 +428,9 @@ def open_for_editing(path: str | Path, max_sample_rate_hz: float = 10000, max_am
             if "data_currents_A" in files:
                 source = SourceData(np.asarray(data["data_currents_A"], float) * 1000,
                                     float(data["data_sample_rate_hz"]), path.name)
-            return [ChannelFormula(f, AwgRange(int(r))) for f, r in zip(formulas, ranges)], rate, duration, source
+            return [ChannelFormula(p, AwgRange(int(r))) for p, r in zip(pieces, ranges)], rate, duration, source
     waveform = load_awg_npz(path, max_sample_rate_hz, max_amplitude_A)
     source = SourceData(waveform.currents_A * 1000, waveform.sample_rate_hz, path.name)
-    channels = [ChannelFormula(f"data({n})" if np.any(waveform.currents_A[:, n - 1]) else "", r)
+    channels = [ChannelFormula.single(f"data({n})" if np.any(waveform.currents_A[:, n - 1]) else "", r)
                 for n, r in zip(range(1, N_CHANNELS + 1), waveform.ranges)]
     return channels, waveform.sample_rate_hz, waveform.duration_s * 1000, source
