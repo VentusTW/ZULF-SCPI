@@ -15,6 +15,7 @@ from zulf_nmr.experiment.parser import SystemConfig
 from zulf_nmr.experiment.schedule import QueueItem, format_delay
 from zulf_nmr.experiment.sequence import acquisition_window_ms
 from zulf_nmr.gui import theme
+from zulf_nmr.gui.axis_drag import AxisDrag
 from zulf_nmr.utils.visualization.awg_plotter import plot_awg
 from zulf_nmr.utils.visualization.events_plotter import AcquisitionWindow, plot_events
 
@@ -267,6 +268,7 @@ class ReviewPanel(ttk.Frame):
         toolbar.update()
         theme.style_toolbar(toolbar)
         toolbar.pack(side="bottom", fill="x")
+        canvas.axis_drag = AxisDrag(canvas, toolbar)
         widget.pack(side="top", fill="x")
         canvas.mpl_connect("scroll_event", lambda e: self._page.scroll(e.step))
         for w in (card, card.body, head, *head.winfo_children()):

@@ -23,6 +23,7 @@ from zulf_nmr.hardware.awg_formula import (
     save_waveform,
 )
 from zulf_nmr.gui import theme, user_settings
+from zulf_nmr.gui.axis_drag import AxisDrag
 from zulf_nmr.gui.formula_hint import GhostText
 from zulf_nmr.gui.tooltip import Tooltip
 from zulf_nmr.utils.visualization import plot_style
@@ -256,6 +257,7 @@ class AwgEditorPanel(ttk.Frame):
         toolbar.update()
         theme.style_toolbar(toolbar)
         toolbar.pack(side="bottom", fill="x")
+        self._axis_drag = AxisDrag(self._canvas, toolbar)
         theme.figure_widget(self._canvas).pack(side="top", fill="both", expand=True, pady=(6, 0))
 
     def _set_segments(self, channel: int, segments: list[Segment]) -> None:

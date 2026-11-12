@@ -16,6 +16,7 @@ from matplotlib.widgets import SpanSelector
 
 from zulf_nmr.experiment.schedule import QueueResult, ResultGroup, Transient
 from zulf_nmr.gui import theme
+from zulf_nmr.gui.axis_drag import AxisDrag
 from zulf_nmr.gui.results_3d import ThreeDView
 from zulf_nmr.gui.tooltip import Tooltip
 from zulf_nmr.utils.visualization.results_plotter import (
@@ -138,6 +139,7 @@ class TraceRow:
         if self._size is not None:
             self.widget.config(width=self._size[0], height=self._size[1])
         self.toolbar = RowToolbar(self.canvas, self._header, self)
+        self._axis_drag = AxisDrag(self.canvas, self.toolbar, manage_cursor=False)
         self.toolbar.bind("<MouseWheel>", lambda e: self.on_scroll and self.on_scroll(e.delta / 120))
         self._layout()
 
@@ -356,6 +358,9 @@ class TraceRow:
     def _on_press(self, event) -> None:
         if self._tool_active():
             return
+        if event.button == 1 and self._axis_drag.axis_at(event) is not None:
+            self._drag_cursor = self._axis_drag.cursor_at(event)
+            return
         if self.cursors_on:
             self._press_cursor(event)
         elif event.button == 3 and event.inaxes is self.ax_time:
@@ -378,8 +383,9 @@ class TraceRow:
     def _on_motion(self, event) -> None:
         """Mouse cursor over the time plot: double arrow at an edge of the selection (resize it),
         hand inside it (move it), arrow elsewhere. Kept while the selection is dragged.
-        With the measuring cursors on: a cross, a double arrow at a cursor; dragging moves it."""
-        if self._tool_active():
+        With the measuring cursors on: a cross, a double arrow at a cursor; dragging moves it.
+        Over the numbers of an axis: a double arrow - dragging there stretches the axis."""
+        if self._tool_active() or self._axis_drag.dragging:
             return
         if self._dragged_cursor is not None:
             plot, index = self._dragged_cursor
@@ -415,6 +421,9 @@ class TraceRow:
         self._on_select(t0, t1)
 
     def _hover_cursor(self, event) -> Cursors:
+        axis_cursor = self._axis_drag.cursor_at(event)
+        if axis_cursor is not None:
+            return axis_cursor
         if self.cursors_on:
             if event.inaxes in (self.ax_time, self.ax_spec):
                 plot = "time" if event.inaxes is self.ax_time else "spec"
