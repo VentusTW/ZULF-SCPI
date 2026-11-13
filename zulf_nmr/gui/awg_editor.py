@@ -23,6 +23,7 @@ from zulf_nmr.hardware.awg_formula import (
     save_waveform,
 )
 from zulf_nmr.gui import theme, user_settings
+from zulf_nmr.gui.busy import busy
 from zulf_nmr.gui.axis_drag import AxisDrag
 from zulf_nmr.gui.tooltip import Tooltip
 from zulf_nmr.utils.visualization import plot_style
@@ -458,7 +459,8 @@ class AwgEditorPanel(ttk.Frame):
         if not path:
             return
         try:
-            channels, rate, duration, source = open_for_editing(path, self._max_rate, self._max_amp)
+            with busy(self, f"Opening {Path(path).name}…"):
+                channels, rate, duration, source = open_for_editing(path, self._max_rate, self._max_amp)
         except (OSError, ValueError, KeyError) as e:
             messagebox.showerror("Cannot open", english_error(e), parent=self)
             return

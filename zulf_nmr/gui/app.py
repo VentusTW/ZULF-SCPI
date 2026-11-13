@@ -34,6 +34,7 @@ from zulf_nmr.experiment.parser import (
 from zulf_nmr.experiment.runner import ExperimentAborted
 from zulf_nmr.experiment.schedule import QueueItem, QueueResult, QueueRunner, ResultGroup, Transient
 from zulf_nmr.gui import theme, user_settings
+from zulf_nmr.gui.busy import BusyIndicator, busy
 from zulf_nmr.gui.awg_editor import AwgEditorPanel
 from zulf_nmr.gui.console_panel import MAX_SAVED_HISTORY, ConsolePanel
 from zulf_nmr.gui.queue_editor import QueuePanel
@@ -264,6 +265,8 @@ class App(tk.Tk):
         self._theme_btn = ttk.Button(bar, text="", style="Small.TButton", width=9, command=self._toggle_theme)
         self._theme_btn.pack(side="right", padx=(0, 14))
         self._show_theme_button()
+        self.busy_indicator = BusyIndicator(bar, theme.SURFACE)
+        self.busy_indicator.place_in(side="right", padx=(0, 18))
         Tooltip(self._theme_btn, "Switch between the dark and the light colours")
         Tooltip(simulate, "Run the queue without the instrument: the data are simulated")
         Tooltip(self._abort_btn, "Abort the running queue (sends *RST to the instrument)")
@@ -752,15 +755,16 @@ class App(tk.Tk):
 
     def load_results_folder(self, folder: str | Path) -> None:
         self._log("info", f"Loading results from {folder}...")
-        threading.Thread(target=self._load_results_worker, args=(str(folder),), name="Load results",
+        token = self.busy_indicator.begin(f"Loading {Path(folder).name}…")
+        threading.Thread(target=self._load_results_worker, args=(str(folder), token), name="Load results",
                          daemon=True).start()
 
-    def _load_results_worker(self, folder: str) -> None:
+    def _load_results_worker(self, folder: str, token: int) -> None:
         """Read a results folder off the Tk thread: hundreds of files take seconds."""
         try:
-            self._incoming.put(("history", load_results(folder)))
+            self._incoming.put(("history", (token, load_results(folder))))
         except (HistoryError, OSError, ValueError) as e:
-            self._incoming.put(("history_error", english_error(e)))
+            self._incoming.put(("history_error", (token, english_error(e))))
 
     def _show_history(self, result: QueueResult, warnings: list[str]) -> None:
         for warning in warnings:
@@ -849,10 +853,17 @@ class App(tk.Tk):
                     self._set_progress(text)
                     self._log("info", text)
                 elif tag == "history":
-                    self._show_history(*text)
+                    token, loaded = text
+                    try:
+                        with busy(self, "Showing the results…"):
+                            self._show_history(*loaded)
+                    finally:
+                        self.busy_indicator.end(token)
                 elif tag == "history_error":
-                    self._log("error", f"Cannot load results: {text}")
-                    messagebox.showerror("Cannot load results", text, parent=self)
+                    token, error = text
+                    self.busy_indicator.end(token)
+                    self._log("error", f"Cannot load results: {error}")
+                    messagebox.showerror("Cannot load results", error, parent=self)
                 elif tag == "finished":
                     self._finished(text)
                 else:

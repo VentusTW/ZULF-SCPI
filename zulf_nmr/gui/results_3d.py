@@ -20,6 +20,7 @@ from mpl_toolkits.mplot3d.art3d import Line3DCollection
 from PIL import Image, ImageDraw, ImageTk
 
 from zulf_nmr.gui import theme
+from zulf_nmr.gui.busy import busy
 from zulf_nmr.gui.tooltip import Tooltip
 from zulf_nmr.utils.visualization import plot_style
 from zulf_nmr.utils.visualization.results_plotter import spectrum
@@ -269,7 +270,8 @@ class ThreeDView(ttk.Frame):
             azim = (ax.azim + step[1] + 180.0) % 360.0 - 180.0
         ax.view_init(elev=elev, azim=azim)
         self._view = (elev, azim)
-        self._canvas.draw_idle()
+        with busy(self, "Turning the 3D plot…"):
+            self._canvas.draw()
 
     def _update_turn_buttons(self) -> None:
         state = ["!disabled"] if self._ax3d() is not None else ["disabled"]
@@ -361,6 +363,11 @@ class ThreeDView(ttk.Frame):
     def draw(self) -> None:
         """Read the transients and draw those in the chosen range: a 3D plot of two or more,
         an ordinary 2D plot of one."""
+        with busy(self, "Drawing the 3D plot…"):
+            self._build()
+            self._canvas.draw()
+
+    def _build(self) -> None:
         transients = self._transients()
         figure = self._figure
         ax = self._ax3d()

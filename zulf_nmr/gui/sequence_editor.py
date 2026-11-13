@@ -14,6 +14,7 @@ from zulf_nmr.core.errors import english_error
 from zulf_nmr.core.scpi import header_matches
 from zulf_nmr.experiment.parser import ConfigError, SystemConfig, load_experiment_config, parse_experiment
 from zulf_nmr.gui import theme
+from zulf_nmr.gui.busy import busy
 from zulf_nmr.gui.tooltip import Tooltip
 from zulf_nmr.hardware.acquisition import ADC_CHANNELS
 from zulf_nmr.hardware.awg import load_awg_npz
@@ -274,7 +275,10 @@ class SequenceEditorPanel(ttk.Frame):
 
     def load(self, path: str | Path) -> None:
         """Open an experiment file; it may contain errors (they are listed)."""
-        path = Path(path)
+        with busy(self, f"Opening {Path(path).name}…"):
+            self._load(Path(path))
+
+    def _load(self, path: Path) -> None:
         try:
             with open(path, encoding="utf-8") as f:
                 data = json.load(f)

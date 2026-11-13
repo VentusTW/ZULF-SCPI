@@ -10,6 +10,7 @@ from typing import Callable
 from zulf_nmr.experiment.parser import HardwareLimits
 from zulf_nmr.experiment.schedule import TIME_UNITS, QueueItem, format_delay, load_item, queue_errors
 from zulf_nmr.gui import theme
+from zulf_nmr.gui.busy import busy
 from zulf_nmr.gui.tooltip import Tooltip
 
 
@@ -49,8 +50,9 @@ class QueuePanel(ttk.Frame):
 
     def add_files(self, paths: list[str | Path]) -> None:
         """Add experiment files at the end of the queue (each one validated)."""
-        for path in paths:
-            self._items.append(load_item(path, self._limits))
+        with busy(self, "Reading the experiment files…"):
+            for path in paths:
+                self._items.append(load_item(path, self._limits))
         self._refresh()
         if self._items:
             self._select(len(self._items) - 1)
@@ -280,11 +282,12 @@ class QueuePanel(ttk.Frame):
         index = self._selected_index()
         insert_at = len(self._items) if index is None else index + 1
         bad: list[QueueItem] = []
-        for offset, path in enumerate(paths):
-            item = load_item(path, self._limits)
-            self._items.insert(insert_at + offset, item)
-            if item.errors:
-                bad.append(item)
+        with busy(self, "Reading the experiment files…"):
+            for offset, path in enumerate(paths):
+                item = load_item(path, self._limits)
+                self._items.insert(insert_at + offset, item)
+                if item.errors:
+                    bad.append(item)
         self._initial_dir = Path(paths[-1]).parent
         self._refresh()
         self._select(insert_at)
