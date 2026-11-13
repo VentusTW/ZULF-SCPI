@@ -22,7 +22,7 @@ class Digital:
     def set_state(self, channel: int, state: bool | int) -> None:
         """:DIGital:STATe <ch>, <state> - 0 = LOW, 1 = HIGH."""
         self._check_channel(channel)
-        if state not in (0, 1):  # also accepts True / False
+        if state not in (0, 1):
             raise ValueError(f"Digital state must be 0 or 1, got {state!r}")
         self._conn.write(f":DIG:STAT {channel},{int(state)}")
 

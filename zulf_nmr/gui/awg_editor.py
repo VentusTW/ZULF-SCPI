@@ -1,4 +1,4 @@
-"""Window for writing an AWG sequence (.npz) from formulas, with a calculator keypad."""
+"""AWG editor panel: an AWG sequence (.npz) written as formulas, with a calculator keypad."""
 
 from __future__ import annotations
 
@@ -6,7 +6,7 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
-from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.figure import Figure
 
 import numpy as np
@@ -16,22 +16,24 @@ from zulf_nmr.hardware.awg import N_CHANNELS, RANGE_FULL_SCALE_A, AwgRange, AwgW
 from zulf_nmr.hardware.awg_fit import fit_channel
 from zulf_nmr.hardware.awg_formula import (
     ChannelFormula,
+    Segment,
     SourceData,
     build_waveform,
     open_for_editing,
     save_waveform,
 )
-from zulf_nmr.gui import user_settings
-from zulf_nmr.gui.formula_hint import GhostText
+from zulf_nmr.gui import theme, user_settings
+from zulf_nmr.gui.busy import busy
+from zulf_nmr.gui.axis_drag import AxisDrag
 from zulf_nmr.gui.tooltip import Tooltip
+from zulf_nmr.utils.visualization import plot_style
 from zulf_nmr.utils.visualization.awg_plotter import plot_awg
 
-_COLOR_ERROR = "#d0342c"
+PREVIEW_DELAY_MS = 150
 _RANGES = {"HIGH (1 A)": AwgRange.HIGH, "LOW (10 mA)": AwgRange.LOW}
-_SETTINGS = "awg_editor"  # section of the saved settings
+_SETTINGS = "awg_editor"
+CHANNELS_HEIGHT_PX = 300
 
-# Calculator keypad: groups of keys, side by side; every key inserts its text
-# ("<" = backspace, "C" = clear the formula), "" leaves a gap.
 _KEYPAD = [
     ("Numbers", [["7", "8", "9", "/"],
                  ["4", "5", "6", "*"],
@@ -46,15 +48,15 @@ _KEYPAD = [
                 ["ramp", "gauss"],
                 ["hann", "chirp"],
                 ["data", ""]]),
-    ("Time and units", [["t", "s"],
-                        ["ms", "us"],
-                        ["Hz", "kHz"],
-                        ["pi", "e"]]),
+    ("Time and units", [["t", "tau"],
+                        ["s", "ms"],
+                        ["us", "Hz"],
+                        ["kHz", "pi"],
+                        ["e", ""]]),
 ]
 _KEY_LABELS = {"<": "⌫"}
 _FUNCTIONS = {"sin", "cos", "tan", "exp", "log", "sqrt", "root", "abs", "min", "max",
               "step", "pulse", "ramp", "gauss", "hann", "chirp", "data"}
-# Shown after the mouse rests on a keypad key (digits have none).
 _KEY_NAMES = {
     "/": "divide", "*": "multiply", "-": "subtract (or minus)", "+": "add", "^": "power: 2^3 = 8",
     ".": "decimal point", ",": "separates the arguments of a function", "(": "opening bracket",
@@ -68,125 +70,163 @@ _KEY_NAMES = {
     "max": "max(a, b) - the larger of a and b, at every moment",
     "pi": "pi - 3.14159...", "e": "e - Euler's number, 2.71828...",
     "t": "t - time in seconds after :AWG:RUN",
+    "tau": "tau - time in seconds from the start of the segment",
     "ms": "ms - millisecond, 0.001 s", "us": "us - microsecond, 0.000001 s", "s": "s - second",
     "kHz": "kHz - kilohertz, 1000 Hz", "Hz": "Hz - hertz",
-    "step": "step(t0) - 0 before t0, 1 from t0 on",
-    "pulse": "pulse(t0, t1) - 1 from t0 to t1, 0 elsewhere",
-    "ramp": "ramp(t0, t1) - rises in a straight line from 0 at t0 to 1 at t1, then stays 1",
-    "gauss": "gauss(t0, sigma) - Gaussian bell centred at t0, height 1",
-    "hann": "hann(t0, t1) - smooth window: 0 at t0, 1 in the middle, 0 at t1",
-    "chirp": "chirp(f0, f1, t0, t1) - sine sweeping from f0 to f1 between t0 and t1, 0 outside",
+    "step": "step(t0) - 0 before t0, 1 from t0 on (t0 from the start of the segment)",
+    "pulse": "pulse(t0, t1) - 1 from t0 to t1, 0 elsewhere (times from the start of the segment)",
+    "ramp": "ramp(t0, t1) - rises in a straight line from 0 at t0 to 1 at t1, then stays 1 "
+            "(times from the start of the segment)",
+    "gauss": "gauss(t0, sigma) - Gaussian bell centred at t0, height 1 (t0 from the start of the segment)",
+    "hann": "hann(t0, t1) - smooth window: 0 at t0, 1 in the middle, 0 at t1 (times from the start of the segment)",
+    "chirp": "chirp(f0, f1, t0, t1) - sine sweeping from f0 to f1 between t0 and t1, 0 outside "
+             "(times from the start of the segment)",
     "data": "data(n) - channel n of the file opened with Open...",
     "<": "delete the character before the cursor", "C": "clear the whole formula",
 }
 
-# Greyed in an empty formula field.
 _EXAMPLES = ("200*pulse(5ms, 15ms)", "5*sin(2*pi*300Hz*t)*exp(-t/15ms)",
              "500*ramp(40ms, 45ms) - 500*ramp(65ms, 70ms)", "300*chirp(100Hz, 800Hz, 10ms, 60ms)")
 
 
-class AwgEditor(tk.Toplevel):
+class _SegmentVars:
+    """What is typed in one segment row."""
+
+    def __init__(self, formula: str = "", start: str = "", stop: str = "") -> None:
+        self.formula = tk.StringVar(value=formula)
+        self.start = tk.StringVar(value=start)
+        self.stop = tk.StringVar(value=stop)
+
+    def segment(self) -> Segment:
+        return Segment(self.formula.get(), self.start.get(), self.stop.get())
+
+
+class AwgEditorPanel(ttk.Frame):
     """Formulas for the 4 AWG channels, a live preview and Save as .npz.
 
-    The file is written only when the user presses Save and every channel is valid;
-    it is then read back with the same checks as an experiment uses (load_awg_npz).
+    Every channel is made of one or more segments (piecewise): a formula with its start
+    and stop time in ms; an empty start is 0, an empty stop the end of the sequence.
+    "+ segment" adds a row. The file is written only when the user presses Save and
+    every channel is valid; it is then read back with the same checks as an experiment
+    uses (load_awg_npz).
     """
 
     def __init__(self, parent: tk.Misc, initial_dir: Path, max_sample_rate_hz: float,
                  max_amplitude_A: float, on_saved=None) -> None:
-        super().__init__(parent)
-        self.title("AWG sequence editor")
-        self.geometry(f"{min(1250, self.winfo_screenwidth() - 80)}x{min(900, self.winfo_screenheight() - 100)}+60+30")
+        super().__init__(parent, padding=(18, 16, 18, 16))
         self._initial_dir = initial_dir
         self._max_rate = max_sample_rate_hz
         self._max_amp = max_amplitude_A
         self._on_saved = on_saved
         self._pending: str | None = None
         self._waveform: AwgWaveform | None = None
+        self._pending_preview: str | None = None
+        self._drawn: AwgWaveform | None = None
         self._errors: list[str] = []
-        self._source: SourceData | None = None  # samples of the opened file, for data(n)
+        self._source: SourceData | None = None
 
-        # What was typed last time, or the defaults.
         saved = user_settings.load_section(_SETTINGS)
-        formulas = saved.get("formulas")
-        if not (isinstance(formulas, list) and len(formulas) == N_CHANNELS
-                and all(isinstance(f, str) for f in formulas)):
-            formulas = ["200*pulse(5*ms, 15*ms)"] + [""] * (N_CHANNELS - 1)
+        segments = _saved_segments(saved)
         ranges = saved.get("ranges")
         if not (isinstance(ranges, list) and len(ranges) == N_CHANNELS and all(r in _RANGES for r in ranges)):
             ranges = ["HIGH (1 A)"] * N_CHANNELS
         self._rate = tk.StringVar(value=user_settings.text(saved, "sample_rate_hz", "10000"))
         self._duration = tk.StringVar(value=user_settings.text(saved, "duration_ms", "50"))
-        self._formulas = [tk.StringVar(value=f) for f in formulas]
+        self._segments: list[list[_SegmentVars]] = [[] for _ in range(N_CHANNELS)]
         self._ranges = [tk.StringVar(value=r) for r in ranges]
+        self._entries: list[ttk.Entry] = []
+        self._active: ttk.Entry | None = None
 
         self._build_ui()
-        for var in (self._rate, self._duration, *self._formulas, *self._ranges):
+        for var in (self._rate, self._duration, *self._ranges):
             var.trace_add("write", lambda *_: self._schedule_update())
-        self._active = self._entries[0]
+        for i, channel in enumerate(segments):
+            self._set_segments(i, channel)
         self._entries[0].focus_set()
         self._update()
 
     def destroy(self) -> None:
-        """Close - also when the main window closes - remembering what was typed."""
+        """Closed with the main window: remember what was typed."""
+        self.save_settings()
+        super().destroy()
+
+    def restyle(self) -> None:
+        """Draw the preview again in the colours of the current theme."""
+        self._drawn = None
+        self._figure.clear()
+        self._figure.set_facecolor(plot_style.PANEL)
+        if self._waveform is not None:
+            self._draw_preview()
+        else:
+            self._canvas.draw_idle()
+
+    def save_settings(self) -> None:
         user_settings.save_section(_SETTINGS, {
             "sample_rate_hz": self._rate.get(),
             "duration_ms": self._duration.get(),
             "ranges": [r.get() for r in self._ranges],
-            "formulas": [f.get() for f in self._formulas],
+            "segments": [[[s.formula.get(), s.start.get(), s.stop.get()] for s in channel]
+                         for channel in self._segments],
         })
-        super().destroy()
-
-    # -------------------------------------------------------------------- UI
 
     def _build_ui(self) -> None:
-        bottom = ttk.Frame(self, padding=8)
-        bottom.pack(side="bottom", fill="x")
-        ttk.Button(bottom, text="Open…", command=self._open).pack(side="left")
-        ttk.Button(bottom, text="Fit formulas", command=self._fit).pack(side="left", padx=(6, 0))
-        self._source_label = ttk.Label(bottom, text="", foreground="#666666")
-        self._source_label.pack(side="left", padx=(8, 0))
-        self._summary = ttk.Label(bottom, text="")
-        self._summary.pack(side="left", padx=12)
-        ttk.Button(bottom, text="Close", command=self.destroy).pack(side="right")
-        ttk.Button(bottom, text="Save…", command=self._save).pack(side="right", padx=(0, 6))
+        head = theme.card(self, padding=12)
+        head.pack(side="top", fill="x")
+        theme.heading(head.body, "AWG generator").pack(side="left")
+        self._summary = theme.Badge(head.body, "", theme.MUTED)
+        self._summary.pack(side="left", padx=10)
+        ttk.Button(head.body, text="Save…", style="Accent.TButton", command=self._save).pack(side="right")
+        ttk.Button(head.body, text="Fit formulas", command=self._fit).pack(side="right", padx=(0, 6))
+        ttk.Button(head.body, text="Open…", command=self._open).pack(side="right", padx=(0, 6))
+        self._source_label = ttk.Label(head.body, text="", style="Card.TLabel", foreground=theme.MUTED,
+                                       font=theme.mono(9))
+        self._source_label.pack(side="right", padx=(0, 12))
 
-        top = ttk.Frame(self, padding=(8, 8, 8, 0))
-        top.pack(side="top", fill="x")
+        top_card = theme.card(self, padding=12)
+        top_card.pack(side="top", fill="x", pady=(12, 0))
+        top = top_card.body
 
-        left = ttk.Frame(top)
+        keypad = ttk.Frame(top, style="Card.TFrame")
+        keypad.pack(side="right", anchor="n", padx=(16, 0))
+        left = ttk.Frame(top, style="Card.TFrame")
         left.pack(side="left", fill="both", expand=True)
-        params = ttk.Frame(left)
+        params = ttk.Frame(left, style="Card.TFrame")
         params.pack(side="top", fill="x")
-        ttk.Label(params, text="Sample rate (Hz):").pack(side="left")
-        ttk.Entry(params, textvariable=self._rate, width=10).pack(side="left", padx=(4, 16))
-        ttk.Label(params, text="Duration (ms):").pack(side="left")
-        ttk.Entry(params, textvariable=self._duration, width=10).pack(side="left", padx=(4, 16))
-        self._general = ttk.Label(params, text="")
+        theme.caption(params, "Sample rate (Hz)").pack(side="left")
+        ttk.Entry(params, textvariable=self._rate, width=10, font=theme.mono(10)).pack(side="left", padx=(6, 18))
+        theme.caption(params, "Duration (ms)").pack(side="left")
+        ttk.Entry(params, textvariable=self._duration, width=10, font=theme.mono(10)).pack(side="left", padx=(6, 18))
+        self._general = ttk.Label(params, text="", style="Card.TLabel", font=theme.mono(9))
         self._general.pack(side="left")
 
-        grid = ttk.Frame(left)
-        grid.pack(side="top", fill="x", pady=8)
-        grid.columnconfigure(2, weight=1)
-        self._entries: list[ttk.Entry] = []
+        self._page = theme.ScrollPage(left, background=theme.PANEL, style="Card.TFrame")
+        self._page.view.config(height=CHANNELS_HEIGHT_PX)
+        self._page.pack(side="top", fill="x", pady=(8, 0))
+        self._channel_frames: list[ttk.Frame] = []
         self._status: list[ttk.Label] = []
         for i in range(N_CHANNELS):
-            ttk.Label(grid, text=f"CH{i + 1}").grid(row=2 * i, column=0, sticky="w", padx=(0, 6))
-            ttk.Combobox(grid, textvariable=self._ranges[i], values=list(_RANGES), state="readonly",
-                         width=12).grid(row=2 * i, column=1, sticky="w")
-            entry = ttk.Entry(grid, textvariable=self._formulas[i], font=("Consolas", 10))
-            entry.grid(row=2 * i, column=2, sticky="ew", padx=6)
-            entry.bind("<FocusIn>", lambda _e, w=entry: setattr(self, "_active", w))
-            self._entries.append(entry)
-            ghost = GhostText(entry, f"e.g. {_EXAMPLES[i]}")
-            # Typed by a keypad button or set by Open... (no key event): update the hint too.
-            self._formulas[i].trace_add("write", lambda *_, g=ghost: self.after_idle(g.update))
-            status = ttk.Label(grid, text="", foreground="#666666")
-            status.grid(row=2 * i + 1, column=2, sticky="w", padx=6, pady=(0, 4))
+            block = ttk.Frame(self._page.inner, style="Card.TFrame", padding=(0, 4, 8, 6))
+            block.pack(side="top", fill="x")
+            head_row = ttk.Frame(block, style="Card.TFrame")
+            head_row.pack(side="top", fill="x")
+            ttk.Label(head_row, text=f"CH{i + 1}", style="Card.TLabel", foreground=plot_style.series(i),
+                      font=theme.mono(10, "bold"), width=5).pack(side="left")
+            ttk.Combobox(head_row, textvariable=self._ranges[i], values=list(_RANGES), state="readonly",
+                         width=12, font=theme.mono(9)).pack(side="left")
+            add = ttk.Button(head_row, text="+ segment", style="Small.TButton",
+                             command=lambda c=i: self._add_segment(c))
+            add.pack(side="left", padx=(10, 0))
+            Tooltip(add, "Add a segment: the next piece of this channel, with its own formula")
+            status = ttk.Label(head_row, text="", style="Card.TLabel", foreground=theme.MUTED, font=theme.mono(8))
+            status.pack(side="left", padx=(12, 0))
             self._status.append(status)
+            rows = ttk.Frame(block, style="Card.TFrame")
+            rows.pack(side="top", fill="x", pady=(4, 0))
+            rows.columnconfigure(1, weight=1)
+            self._channel_frames.append(rows)
+            for widget in (block, head_row, rows):
+                self._page.bind_wheel(widget)
 
-        keypad = ttk.Frame(top)
-        keypad.pack(side="right", anchor="n", padx=(12, 0))
         for g, (title, rows) in enumerate(_KEYPAD):
             group = ttk.LabelFrame(keypad, text=title, padding=4)
             group.grid(row=0, column=g, sticky="ns", padx=(0 if g == 0 else 6, 0))
@@ -195,17 +235,94 @@ class AwgEditor(tk.Toplevel):
                     if not key:
                         continue
                     button = ttk.Button(group, text=_KEY_LABELS.get(key, key), width=6, takefocus=False,
-                                        command=lambda k=key: self._key(k))
+                                        style="Key.TButton", command=lambda k=key: self._key(k))
                     button.grid(row=r, column=c, padx=1, pady=1)
                     if key in _KEY_NAMES:
                         Tooltip(button, _KEY_NAMES[key])
 
+        preview = theme.card(self, padding=12)
+        preview.pack(side="top", fill="both", expand=True, pady=(12, 0))
         self._figure = Figure(figsize=(11, 6), layout="constrained")
-        self._canvas = FigureCanvasTkAgg(self._figure, master=self)
-        self._canvas.get_tk_widget().pack(side="top", fill="both", expand=True, padx=8, pady=8)
+        self._canvas = FigureCanvasTkAgg(self._figure, master=preview.body)
+        toolbar = NavigationToolbar2Tk(self._canvas, preview.body, pack_toolbar=False)
+        toolbar.update()
+        theme.style_toolbar(toolbar)
+        toolbar.pack(side="bottom", fill="x")
+        self._axis_drag = AxisDrag(self._canvas, toolbar)
+        Tooltip(self._canvas.get_tk_widget(), "Current in mA versus time after :AWG:RUN, as the AWG outputs it "
+                                              "(every sample held until the next)")
+        theme.figure_widget(self._canvas).pack(side="top", fill="both", expand=True, pady=(6, 0))
+
+    def _set_segments(self, channel: int, segments: list[Segment]) -> None:
+        """Replace the segments of a channel (at least one row stays)."""
+        self._segments[channel] = [_SegmentVars(s.formula, s.start_ms, s.stop_ms) for s in segments] or [
+            _SegmentVars()]
+        for vars_ in self._segments[channel]:
+            for var in (vars_.formula, vars_.start, vars_.stop):
+                var.trace_add("write", lambda *_: self._schedule_update())
+        self._render_channel(channel)
+        self._schedule_update()
+
+    def _render_channel(self, channel: int) -> None:
+        """Build the rows of one channel's segments again."""
+        frame = self._channel_frames[channel]
+        for child in frame.winfo_children():
+            if child in self._entries_of(frame):
+                self._entries.remove(child)
+            child.destroy()
+        segments = self._segments[channel]
+        for r, vars_ in enumerate(segments):
+            ttk.Label(frame, text=f"{r + 1}." if len(segments) > 1 else "", style="Card.TLabel",
+                      foreground=theme.DIM, font=theme.mono(8), width=4).grid(row=r, column=0, sticky="w")
+            entry = ttk.Entry(frame, textvariable=vars_.formula, font=theme.mono(10))
+            entry.grid(row=r, column=1, sticky="ew", padx=(0, 8), pady=1)
+            entry.bind("<FocusIn>", lambda _e, w=entry: setattr(self, "_active", w))
+            entry._channel_entry = True
+            self._entries.append(entry)
+            example = _EXAMPLES[channel] if r == 0 else "100*sin(2*pi*1kHz*tau)"
+            Tooltip(entry, f"Formula of the segment, e.g. {example}\n"
+                           "t: time after :AWG:RUN, tau: time from t_start; the times in step, pulse, ramp,\n"
+                           "gauss, hann and chirp count from t_start. Outside the segments the channel is 0.")
+            theme.caption(frame, "t_start").grid(row=r, column=2, padx=(0, 4))
+            start = ttk.Entry(frame, textvariable=vars_.start, width=8, font=theme.mono(10))
+            start.grid(row=r, column=3)
+            Tooltip(start, "Start of the segment (ms); empty: where the previous segment stops")
+            theme.caption(frame, "t_stop").grid(row=r, column=4, padx=(8, 4))
+            stop = ttk.Entry(frame, textvariable=vars_.stop, width=8, font=theme.mono(10))
+            stop.grid(row=r, column=5)
+            Tooltip(stop, "End of the segment (ms); empty: where the next segment starts, or the end")
+            theme.caption(frame, "ms").grid(row=r, column=6, padx=(4, 6))
+            remove = ttk.Button(frame, text="✕", style="Small.TButton", width=3,
+                                command=lambda c=channel, n=r: self._remove_segment(c, n))
+            remove.grid(row=r, column=7)
+            if len(segments) == 1:
+                remove.state(["disabled"])
+            for widget in (entry, start, stop, remove):
+                self._page.bind_wheel(widget)
+        if self._active is None or not self._active.winfo_exists():
+            self._active = self._entries[0] if self._entries else None
+
+    @staticmethod
+    def _entries_of(frame: ttk.Frame) -> list[tk.Misc]:
+        return [w for w in frame.winfo_children() if getattr(w, "_channel_entry", False)]
+
+    def _add_segment(self, channel: int) -> None:
+        """A new row after the last one; its t_start (to be typed) ends the previous segment."""
+        segments = [v.segment() for v in self._segments[channel]]
+        segments.append(Segment("", segments[-1].stop_ms.strip(), ""))
+        self._set_segments(channel, segments)
+        self._entries_of(self._channel_frames[channel])[-1].focus_set()
+
+    def _remove_segment(self, channel: int, index: int) -> None:
+        segments = [v.segment() for v in self._segments[channel]]
+        if len(segments) > 1:
+            del segments[index]
+            self._set_segments(channel, segments)
 
     def _key(self, key: str) -> None:
         entry = self._active
+        if entry is None or not entry.winfo_exists():
+            return
         entry.focus_set()
         if key == "C":
             entry.delete(0, "end")
@@ -216,16 +333,16 @@ class AwgEditor(tk.Toplevel):
         else:
             entry.insert("insert", f"{key}(" if key in _FUNCTIONS else key)
 
-    # ---------------------------------------------------------------- update
-
     def _schedule_update(self) -> None:
-        # At once, as soon as Tk is idle: several changes in one event (e.g. Open... setting
-        # every field) still give one update.
         if self._pending is None:
             self._pending = self.after_idle(self._update)
 
     def _channels(self) -> list[ChannelFormula]:
-        return [ChannelFormula(self._formulas[i].get(), _RANGES[self._ranges[i].get()]) for i in range(N_CHANNELS)]
+        return [ChannelFormula([v.segment() for v in self._segments[i]], _RANGES[self._ranges[i].get()])
+                for i in range(N_CHANNELS)]
+
+    def _has_formula(self, channel: int) -> bool:
+        return any(v.formula.get().strip() for v in self._segments[channel])
 
     def _update(self) -> None:
         """Evaluate the formulas, show every problem at once and redraw the preview."""
@@ -233,7 +350,7 @@ class AwgEditor(tk.Toplevel):
         try:
             rate, duration = float(self._rate.get().replace(",", ".")), float(self._duration.get().replace(",", "."))
         except ValueError:
-            self._show([f"sample rate and duration must be numbers"], [None] * N_CHANNELS, None)
+            self._show(["sample rate and duration must be numbers"], [None] * N_CHANNELS, None)
             return
         waveform, errors, channel_errors = build_waveform(
             self._channels(), rate, duration, self._max_rate, self._max_amp, self._source)
@@ -242,33 +359,39 @@ class AwgEditor(tk.Toplevel):
     def _show(self, errors: list[str], channel_errors: list[str | None], waveform: AwgWaveform | None) -> None:
         self._errors = errors + [f"CH{i + 1}: {e}" for i, e in enumerate(channel_errors) if e]
         self._waveform = waveform if not self._errors else None
-        self._general.config(text="; ".join(errors), foreground=_COLOR_ERROR)
+        self._general.config(text="; ".join(errors), foreground=theme.DANGER)
         for i, label in enumerate(self._status):
             if channel_errors[i]:
-                label.config(text=channel_errors[i], foreground=_COLOR_ERROR)
+                label.config(text=channel_errors[i], foreground=theme.DANGER)
             elif waveform is not None:
                 peak = abs(waveform.currents_A[:, i]).max() * 1000
-                label.config(text=f"OK, peak {peak:.4g} mA" if self._formulas[i].get().strip() else "0 mA (empty)",
-                             foreground="#2e9e44" if self._formulas[i].get().strip() else "#666666")
+                label.config(text=f"OK, peak {peak:.4g} mA" if self._has_formula(i) else "0 mA (empty)",
+                             foreground=theme.OK if self._has_formula(i) else theme.MUTED)
             else:
                 label.config(text="")
         if not self._errors:
-            # Every channel is OK: draw it now.
-            self._summary.config(
-                text=f"{waveform.n_samples} samples, {waveform.sample_rate_hz:g} Hz, {waveform.duration_s * 1000:g} ms",
-                foreground="")
-            self._figure.clear()
-            plot_awg(waveform, fig=self._figure)
-            self._canvas.draw_idle()
+            self._summary.set(
+                f"{waveform.n_samples} samples / {waveform.sample_rate_hz:g} Hz / {waveform.duration_s * 1000:g} ms",
+                theme.ACCENT)
+            if self._pending_preview is not None:
+                self.after_cancel(self._pending_preview)
+            self._pending_preview = self.after(PREVIEW_DELAY_MS, self._draw_preview)
         else:
-            # E.g. a formula half typed: keep the last valid preview instead of a broken one.
-            self._summary.config(text="fix the errors - the preview shows the last valid version",
-                                 foreground=_COLOR_ERROR)
+            self._summary.set("fix the errors - the preview shows the last valid version", theme.DANGER)
 
-    # ------------------------------------------------------------ open, save
+    def _draw_preview(self) -> None:
+        self._pending_preview = None
+        waveform = self._waveform
+        if waveform is None or _same_waveform(waveform, self._drawn):
+            return
+        self._drawn = waveform
+        self._figure.clear()
+        self._figure.set_facecolor(plot_style.PANEL)
+        plot_awg(waveform, fig=self._figure, show_title=False)
+        self._canvas.draw_idle()
 
     def _save(self) -> None:
-        if self._pending is not None:  # the user typed and pressed Save at once
+        if self._pending is not None:
             self.after_cancel(self._pending)
             self._update()
         if self._waveform is None:
@@ -301,12 +424,21 @@ class AwgEditor(tk.Toplevel):
             messagebox.showinfo("Fit formulas", "Open an AWG file first - its channels (data(n)) are "
                                                 "what the formulas are fitted to.", parent=self)
             return
+        self.config(cursor="watch")
+        self.update_idletasks()
+        try:
+            lines = self._fit_channels()
+        finally:
+            self.config(cursor="")
+        messagebox.showinfo("Fit formulas", "\n".join(lines), parent=self)
+
+    def _fit_channels(self) -> list[str]:
         lines = []
-        for i, var in enumerate(self._formulas):
-            text = var.get().strip().replace(" ", "")
+        for i, channel_formula in enumerate(self._channels()):
+            text = channel_formula.formula.strip().replace(" ", "")
             n = i + 1
             if not (text.startswith("data(") and text.endswith(")") and text[5:-1].isdigit()):
-                lines.append(f"CH{n}: unchanged (not a plain data(n) formula)")
+                lines.append(f"CH{n}: unchanged (not one segment with a plain data(n) formula)")
                 continue
             channel = int(text[5:-1])
             if not 1 <= channel <= N_CHANNELS:
@@ -317,9 +449,9 @@ class AwgEditor(tk.Toplevel):
             if result.formula is None:
                 lines.append(f"CH{n}: kept {text} - {result.note}")
             else:
-                var.set(result.formula)
+                self._segments[i][0].formula.set(result.formula)
                 lines.append(f"CH{n}: {result.note}, max error {result.max_error_mA:.2g} mA")
-        messagebox.showinfo("Fit formulas", "\n".join(lines), parent=self)
+        return lines
 
     def _open(self) -> None:
         path = filedialog.askopenfilename(parent=self, title="Open AWG sequence", initialdir=self._initial_dir,
@@ -327,7 +459,8 @@ class AwgEditor(tk.Toplevel):
         if not path:
             return
         try:
-            channels, rate, duration, source = open_for_editing(path, self._max_rate, self._max_amp)
+            with busy(self, f"Opening {Path(path).name}…"):
+                channels, rate, duration, source = open_for_editing(path, self._max_rate, self._max_amp)
         except (OSError, ValueError, KeyError) as e:
             messagebox.showerror("Cannot open", english_error(e), parent=self)
             return
@@ -336,6 +469,25 @@ class AwgEditor(tk.Toplevel):
         self._rate.set(f"{rate:g}")
         self._duration.set(f"{duration:g}")
         for i, ch in enumerate(channels[:N_CHANNELS]):
-            self._formulas[i].set(ch.formula)
+            self._set_segments(i, ch.segments)
             self._ranges[i].set(next(k for k, v in _RANGES.items() if v == ch.range_))
         self._initial_dir = Path(path).parent
+
+
+def _same_waveform(a: AwgWaveform, b: AwgWaveform | None) -> bool:
+    return (b is not None and a.sample_rate_hz == b.sample_rate_hz and a.ranges == b.ranges
+            and a.source_path == b.source_path and np.array_equal(a.currents_A, b.currents_A))
+
+
+def _saved_segments(saved: dict) -> list[list[Segment]]:
+    """The segments typed last time; the formulas of older settings become one segment each."""
+    segments = saved.get("segments")
+    if (isinstance(segments, list) and len(segments) == N_CHANNELS
+            and all(isinstance(ch, list) and ch and all(isinstance(x, list) and len(x) == 3
+                                                         and all(isinstance(v, str) for v in x) for x in ch)
+                    for ch in segments)):
+        return [[Segment(*x) for x in ch] for ch in segments]
+    formulas = saved.get("formulas")
+    if not (isinstance(formulas, list) and len(formulas) == N_CHANNELS and all(isinstance(f, str) for f in formulas)):
+        formulas = ["200*pulse(5*ms, 15*ms)"] + [""] * (N_CHANNELS - 1)
+    return [[Segment(f)] for f in formulas]

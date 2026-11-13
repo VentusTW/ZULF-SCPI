@@ -16,16 +16,12 @@ from zulf_nmr.core.errors import english_error
 
 log = logging.getLogger(__name__)
 
-# Folder holding config/ and data/: the package folder, or - in a PyInstaller
-# executable, whose own files are unpacked to a temporary folder - the folder of the .exe.
 APP_DIR = (
     Path(sys.executable).resolve().parent if getattr(sys, "frozen", False)
     else Path(__file__).resolve().parent.parent
 )
 DEFAULT_SYSTEM_CONFIG = APP_DIR / "config" / "system.json"
 
-# A message received from the device: a text line (str) or an
-# IEEE 488.2 definite-length binary block #<hdr><bin> (bytes, payload only).
 Message = Union[str, bytes]
 
 
@@ -76,8 +72,6 @@ class SCPIConnection:
             on_message=on_message,
         )
 
-    # ------------------------------------------------------------------ link
-
     @property
     def is_connected(self) -> bool:
         return (
@@ -92,7 +86,6 @@ class SCPIConnection:
         if self.is_connected:
             return
         self.close()
-        # serial_for_url also accepts test URLs such as "loop://".
         self._serial = serial.serial_for_url(
             self.port,
             baudrate=self.baudrate,
@@ -125,19 +118,31 @@ class SCPIConnection:
     def __exit__(self, *exc) -> None:
         self.close()
 
-    # -------------------------------------------------------------- commands
-
     def write(self, command: str) -> None:
         """Send a command that produces no reply."""
         self._send(command.encode("ascii") + self.TERMINATOR)
 
     def write_binary(self, command: str, payload: bytes) -> None:
-        """Send a command followed by a #<hdr><bin> block, e.g. :AWG:DATA."""
+        """Send a command followed by a #<hdr><bin> block."""
+        self._send(self._with_block(command, payload))
+
+    def query_block(self, command: str, payload: bytes, timeout_s: float | None = None) -> str:
+        """Send a query with a #<hdr><bin> argument (e.g. :AWG:DATA? #...) and return its text reply."""
+        reply = self._query(command, timeout_s, self._with_block(command, payload))
+        if not isinstance(reply, str):
+            raise TypeError(f"Expected text reply to {command!r}, got binary block")
+        return reply
+
+    def query_any(self, command: str, timeout_s: float | None = None) -> Message:
+        """Send a query whose reply is either text (e.g. err-1) or a #<hdr><bin> block (bytes)."""
+        return self._query(command, timeout_s)
+
+    def _with_block(self, command: str, payload: bytes) -> bytes:
         length = str(len(payload)).encode("ascii")
         if len(length) > 9:
             raise ValueError("Binary block too large for a definite-length header")
         header = b"#" + str(len(length)).encode("ascii") + length
-        self._send(command.encode("ascii") + b" " + header + payload + self.TERMINATOR)
+        return command.encode("ascii") + b" " + header + payload + self.TERMINATOR
 
     def query(self, command: str, timeout_s: float | None = None) -> str:
         """Send a query and return the text reply without the terminator."""
@@ -146,6 +151,14 @@ class SCPIConnection:
             raise TypeError(f"Expected text reply to {command!r}, got binary block")
         return reply
 
+    def query_float(self, command: str, name: str | None = None) -> float:
+        """Send a query whose reply is one number; name is the command named in an error."""
+        reply = self.query(command).strip()
+        try:
+            return float(reply)
+        except ValueError:
+            raise ValueError(f"Unexpected {name or command} reply: {reply!r}") from None
+
     def query_binary(self, command: str, timeout_s: float | None = None) -> bytes:
         """Send a query that answers with a #<hdr><bin> block; return the payload."""
         reply = self._query(command, timeout_s)
@@ -153,17 +166,19 @@ class SCPIConnection:
             raise TypeError(f"Expected binary block in reply to {command!r}, got {reply!r}")
         return reply
 
-    def _query(self, command: str, timeout_s: float | None) -> Message:
+    def _query(self, command: str, timeout_s: float | None, data: bytes | None = None) -> Message:
+        """Send command (or data, the whole message when it carries a block) and wait for the reply."""
         with self._lock:
-            # Anything still queued arrived unrequested; it has already been
-            # passed to on_message, so drop it to keep replies in step.
             while True:
                 try:
                     stale = self._replies.get_nowait()
                 except queue.Empty:
                     break
                 log.debug("Discarding unrequested message: %r", stale)
-            self.write(command)
+            if data is None:
+                self.write(command)
+            else:
+                self._send(data)
             timeout = self.timeout_s if timeout_s is None else timeout_s
             try:
                 return self._replies.get(timeout=timeout)
@@ -186,8 +201,6 @@ class SCPIConnection:
             raise ConnectionError(f"Connection lost: {english_error(self._listener_error)}") \
                 from self._listener_error
 
-    # -------------------------------------------------------------- listener
-
     def _listen(self) -> None:
         buf = bytearray()
         try:
@@ -198,7 +211,7 @@ class SCPIConnection:
                 buf += chunk
                 for message in self._parse(buf):
                     self._dispatch(message)
-        except Exception as e:  # port unplugged, driver error, malformed header...
+        except Exception as e:
             if not self._stop.is_set():
                 log.error("SCPI listener stopped: %s", english_error(e))
                 self._listener_error = e
@@ -207,32 +220,44 @@ class SCPIConnection:
         """Extract complete messages from buf (consumed in place)."""
         messages: list[Message] = []
         while True:
-            # Skip line endings left between messages (e.g. after a block).
             while buf[:1] in (b"\r", b"\n"):
                 del buf[0]
             if not buf:
                 break
-            if buf[:1] == b"#":
-                if len(buf) < 2:
-                    break
-                n_digits = int(chr(buf[1]))
-                if n_digits == 0:
-                    raise ValueError("Indefinite-length binary blocks (#0) are not supported")
-                if len(buf) < 2 + n_digits:
-                    break
-                length = int(buf[2 : 2 + n_digits])
-                start = 2 + n_digits
+            block = self._block_length(buf)
+            if block is None:
+                break
+            if block:
+                start, length = block
                 if len(buf) < start + length:
                     break
                 messages.append(bytes(buf[start : start + length]))
                 del buf[: start + length]
-            else:
-                end = buf.find(self.TERMINATOR)
-                if end < 0:
-                    break
-                messages.append(buf[:end].decode("ascii", errors="replace").rstrip("\r"))
-                del buf[: end + 1]
+                continue
+            end = buf.find(self.TERMINATOR)
+            if end < 0:
+                break
+            messages.append(buf[:end].decode("ascii", errors="replace").rstrip("\r"))
+            del buf[: end + 1]
         return messages
+
+    @staticmethod
+    def _block_length(buf: bytearray) -> tuple[int, int] | tuple[()] | None:
+        """(payload start, payload length) of a #<n><length> header at the start of buf;
+        () if buf does not start with one; None if more bytes are needed to tell."""
+        if buf[:1] != b"#":
+            return ()
+        if len(buf) < 2:
+            return None
+        n_digits = buf[1] - ord("0")
+        if not 1 <= n_digits <= 9:
+            return ()
+        if len(buf) < 2 + n_digits:
+            return None
+        digits = bytes(buf[2 : 2 + n_digits])
+        if not digits.isdigit():
+            return ()
+        return 2 + n_digits, int(digits)
 
     def _dispatch(self, message: Message) -> None:
         if self.on_message is not None:

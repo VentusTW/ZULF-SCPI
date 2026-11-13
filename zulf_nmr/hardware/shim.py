@@ -32,11 +32,7 @@ class Shim:
     def get_current(self, channel: int) -> float:
         """:SHIM:CURRent? <ch> - return the configured DC current in mA."""
         self._check_channel(channel)
-        reply = self._conn.query(f":SHIM:CURR? {channel}").strip()
-        try:
-            return float(reply)
-        except ValueError:
-            raise ValueError(f"Unexpected :SHIM:CURRent? reply: {reply!r}") from None
+        return self._conn.query_float(f":SHIM:CURR? {channel}", ":SHIM:CURRent?")
 
     def _check_channel(self, channel: int) -> None:
         if channel not in self.CHANNELS:

@@ -31,9 +31,6 @@ class ConfigError(ValueError):
         super().__init__(f"{len(errors)} error(s){where}:\n  - " + "\n  - ".join(errors))
 
 
-# --------------------------------------------------------------- dataclasses
-
-
 @dataclass(frozen=True)
 class HardwareLimits:
     max_shim_current_mA: float = 100.0
@@ -49,9 +46,6 @@ class ConnectionSettings:
     timeout_s: float = 2.0
 
 
-# How long each kind of sequence event keeps the device busy, in ms - shown as
-# bars on the event timeline. Placeholder values; they are expected to move to
-# the device's EEPROM. :AWG:RUN lasts as long as the loaded AWG sequence.
 DEFAULT_EVENT_DURATIONS_MS: dict[str, float] = {
     ":MOTor:MOVE": 1500.0,
     ":SHIM:CURRent": 5.0,
@@ -67,7 +61,6 @@ class SystemConfig:
     hardware_limits: HardwareLimits
     data_output: Path
     source_path: Path | None = None
-    # Keyed by the ALLOWED_EVENTS header as written there, e.g. ":MOTor:MOVE".
     event_durations_ms: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_EVENT_DURATIONS_MS))
 
     def event_duration_ms(self, action: str) -> float | None:
@@ -93,9 +86,9 @@ class HardwareParameters:
 
 @dataclass(frozen=True)
 class AcquisitionSettings:
-    start_us: int  # start of the acquisition after :AWG:RUN (:ACQuire:AUTostart)
-    number_of_samples: int  # samples recorded per channel
-    channels: tuple[int, ...]  # ADC channels recorded, saved and shown, ascending
+    start_us: int
+    number_of_samples: int
+    channels: tuple[int, ...]
 
     def duration_s(self, sample_rate_hz: float) -> float:
         return self.number_of_samples / sample_rate_hz
@@ -110,7 +103,7 @@ class Event:
 @dataclass(frozen=True)
 class AwgSequence:
     type: str
-    file_path: Path  # resolved against the config file's directory
+    file_path: Path
 
 
 @dataclass(frozen=True)
@@ -120,13 +113,10 @@ class ExperimentConfig:
     output: OutputSettings
     hardware_parameters: HardwareParameters
     acquisition: AcquisitionSettings
-    events: tuple[Event, ...]  # sorted by time_ms (stable)
+    events: tuple[Event, ...]
     awg_sequence: AwgSequence | None
     source_path: Path | None = None
-    raw: dict[str, Any] = field(default_factory=dict, repr=False)  # saved alongside data
-
-
-# ----------------------------------------------------------------- loaders
+    raw: dict[str, Any] = field(default_factory=dict, repr=False)
 
 
 def load_system_config(path: str | Path = DEFAULT_SYSTEM_CONFIG) -> SystemConfig:
@@ -229,14 +219,14 @@ def parse_experiment(
         hw,
         "hardware_parameters",
         required={"acq_sample_rate_hz"},
-        optional={"acq_duration_ms", "acq_start_awg_time"},  # reported above
+        optional={"acq_duration_ms", "acq_start_awg_time"},
     )
     hardware = HardwareParameters(
         acq_sample_rate_hz=v.number(hw, "acq_sample_rate_hz", "hardware_parameters", positive=True),
     )
 
     acq = v.section(data, "acquisition")
-    if "acquisition" in data:  # a missing section is reported once, by the top-level check
+    if "acquisition" in data:
         v.check_keys(acq, "acquisition", required={"start", "number_of_samples", "channels"})
     acquisition = AcquisitionSettings(
         start_us=v.integer(acq, "start", "acquisition", minimum=0),
@@ -261,7 +251,6 @@ def parse_experiment(
                 v.error(f"{where}.action", f"{action!r}: {problem}")
         events.append(Event(time_ms, action))
     events.sort(key=lambda e: e.time_ms)
-    # acquisition.start counts from :AWG:RUN, so without it nothing would be recorded.
     starts = (":AWG:RUN", ":ACQuire:RUN")
     if events and not any(header_matches(e.action.strip().split(" ", 1)[0], h) for e in events for h in starts):
         v.error("events", "no :AWG:RUN event - the acquisition (acquisition.start) is timed from it, "
@@ -292,9 +281,6 @@ def parse_experiment(
         source_path=source_path,
         raw=data,
     )
-
-
-# -------------------------------------------------------- event validation
 
 
 def validate_action(action: str, limits: HardwareLimits) -> list[str]:
@@ -355,9 +341,6 @@ def _to_float(text: str) -> float | None:
     return value if math.isfinite(value) else None
 
 
-# --------------------------------------------------------------- helpers
-
-
 def _read_json(path: Path) -> dict[str, Any]:
     try:
         with open(path, encoding="utf-8") as f:
@@ -400,7 +383,7 @@ class _Validator:
     def section(self, d: dict, key: str) -> dict:
         value = d.get(key, _MISSING)
         if value is _MISSING:
-            return {}  # "missing" is reported by check_keys
+            return {}
         if not isinstance(value, dict):
             self.error(key, "must be an object")
             return {}

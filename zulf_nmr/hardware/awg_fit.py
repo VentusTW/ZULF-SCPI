@@ -18,15 +18,16 @@ import numpy as np
 
 from zulf_nmr.hardware.awg_formula import FormulaError, evaluate_formula
 
-FIT_TOLERANCE = 1e-3  # max error / channel peak
-_MAX_GAP = 3  # zero samples inside one active part (e.g. a sine crossing zero)
+FIT_TOLERANCE = 1e-3
+_MAX_GAP = 3
 _MAX_RAMPS = 8
+_SEARCH_POINTS = 8192
 
 
 @dataclass
 class FitResult:
-    formula: str | None  # None: no simple formula found
-    max_error_mA: float  # of the formula, or of the best attempt
+    formula: str | None
+    max_error_mA: float
     note: str
 
 
@@ -53,22 +54,14 @@ def fit_channel(values_mA: np.ndarray, sample_rate_hz: float, step_mA: float | N
     return FitResult(formula, error, ", ".join(kinds))
 
 
-# ------------------------------------------------------------------ parts
-
-
 def _active_parts(values: np.ndarray, peak: float) -> list[tuple[int, int]]:
     """[start, end) sample ranges of non-zero data; short zero gaps do not split a part."""
     active = np.abs(values) > 1e-9 * peak
-    idx = np.nonzero(active)[0]
-    parts = []
-    start = prev = idx[0]
-    for i in idx[1:]:
-        if i - prev > _MAX_GAP + 1:
-            parts.append((start, prev + 1))
-            start = i
-        prev = i
-    parts.append((start, prev + 1))
-    return parts
+    idx = np.flatnonzero(active)
+    breaks = np.flatnonzero(np.diff(idx) > _MAX_GAP + 1)
+    starts = [idx[0], *idx[breaks + 1]]
+    ends = [*(idx[breaks] + 1), idx[-1] + 1]
+    return [(int(a), int(b)) for a, b in zip(starts, ends)]
 
 
 def _fit_part(values, t, i0, i1, rate, tolerance):
@@ -99,12 +92,12 @@ def _fit_part(values, t, i0, i1, rate, tolerance):
 
 def _ramps(values, t, i0, i1, rate, tolerance) -> str | None:
     """Straight segments from 0 back to 0: sum of dv*ramp(ta, tb), or None."""
-    a, b = max(i0 - 1, 0), min(i1 + 1, len(values))  # include the zero on each side
+    a, b = max(i0 - 1, 0), min(i1 + 1, len(values))
     x = values[a:b]
     if abs(x[0]) > tolerance or abs(x[-1]) > tolerance:
         return None
     slope = np.diff(x)
-    corners = [0] + [k for k in range(1, len(slope)) if abs(slope[k] - slope[k - 1]) > tolerance] + [len(x) - 1]
+    corners = [0, *(np.flatnonzero(np.abs(np.diff(slope)) > tolerance) + 1).tolist(), len(x) - 1]
     if len(corners) - 1 > _MAX_RAMPS:
         return None
     terms = []
@@ -126,28 +119,41 @@ def _sines(part, tp, t0, t1, rate):
     f0 = np.fft.rfftfreq(n_fft, 1 / rate)[np.argmax(spectrum[1:]) + 1]
     bin_hz = rate / n
 
-    def fit(f, decay):
-        env = np.exp(-decay * tau)
-        basis = np.column_stack([np.sin(2 * np.pi * f * tau) * env, np.cos(2 * np.pi * f * tau) * env])
-        coef, *_ = np.linalg.lstsq(basis, part, rcond=None)
-        return np.abs(basis @ coef - part).max(), f, decay, coef
+    sample = np.unique(np.linspace(0, n - 1, min(n, _SEARCH_POINTS)).astype(int))
 
-    # Coarse grid, then a few rounds of finer grids around the best point.
+    def fit(f, decay, idx=None):
+        y, x = (part, tau) if idx is None else (part[idx], tau[idx])
+        env = np.exp(-decay * x)
+        s, c = np.sin(2 * np.pi * f * x) * env, np.cos(2 * np.pi * f * x) * env
+        ss, cc, sc = s @ s, c @ c, s @ c
+        det = ss * cc - sc * sc
+        if det <= 1e-12 * ss * cc:
+            return np.inf, f, decay, np.zeros(2)
+        sy, cy = s @ y, c @ y
+        coef = np.array([(cc * sy - sc * cy) / det, (ss * cy - sc * sy) / det])
+        return np.abs(s * coef[0] + c * coef[1] - y).max(), f, decay, coef
+
+    def search(freqs, decays, idx):
+        return min((fit(f, d, idx) for f in freqs for d in decays), key=lambda r: r[0])
+
     freqs = np.linspace(max(f0 - bin_hz, bin_hz / 4), f0 + bin_hz, 41)
     decays = [0.0, *np.geomspace(0.1 / tau[-1], 20 / tau[-1], 30)]
-    best = min((fit(f, d) for f in freqs for d in decays), key=lambda r: r[0])
+    best = search(freqs, decays, sample)
     f_step, d_factor = freqs[1] - freqs[0], 1.3
     for _ in range(6):
         _, f_best, d_best, _ = best
         freqs = np.linspace(f_best - 2 * f_step, f_best + 2 * f_step, 21)
         decays = [0.0] if d_best == 0 else np.geomspace(d_best / d_factor, d_best * d_factor, 15)
-        best = min((fit(f, d) for f in freqs for d in decays), key=lambda r: r[0])
+        best = search(freqs, decays, sample)
         f_step, d_factor = f_step / 5, d_factor ** 0.25
+    if len(sample) < n:
+        _, f_best, d_best, _ = best
+        freqs = np.linspace(f_best - 2 * f_step, f_best + 2 * f_step, 5)
+        decays = [0.0] if d_best == 0 else np.geomspace(d_best / d_factor, d_best * d_factor, 3)
+        best = search(freqs, decays, None)
     _, f, decay, (s, c) = best
     amplitude, phase = np.hypot(s, c), np.arctan2(c, s)
     start = f"{_ms(tp[0])}*ms"
-    # The same sine written with 3, 4, ... significant digits: the first one that is
-    # still within the tolerance is used, so the formula stays readable.
     out = []
     for digits in (3, 4, 5, 6, 9):
         sine = (f"{_num(amplitude, digits)}*sin(2*pi*{_num(f, digits)}*(t-{start})"
@@ -158,9 +164,6 @@ def _sines(part, tp, t0, t1, rate):
         else:
             out.append((f"{sine}*pulse({t0}, {t1})", "sine"))
     return [(term.replace("+ -", "- "), kind) for term, kind in out]
-
-
-# ---------------------------------------------------------------- helpers
 
 
 def _error(formula: str, target: np.ndarray, t: np.ndarray) -> float:

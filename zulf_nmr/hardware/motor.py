@@ -15,7 +15,7 @@ class MotorPosition(str, Enum):
     MAGNET = "MAGNET"
     MEASURE = "MEASURE"
     EXTERNAL = "EXTERNAL"
-    OTHER = "OTHER"  # reported by :MOTor:POSition? only, cannot be a target
+    OTHER = "OTHER"
 
 
 class MotorState(str, Enum):

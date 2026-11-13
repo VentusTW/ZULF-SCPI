@@ -5,16 +5,14 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.figure import Figure, SubFigure
 
 from zulf_nmr.hardware.awg import RANGE_FULL_SCALE_A, AwgRange, AwgWaveform, load_awg_npz
+from zulf_nmr.utils.visualization import plot_style
 
-CHANNEL_COLOURS = ("#0072B2", "#E69F00", "#009E73", "#CC79A7")  # Okabe-Ito
-
-
-ACQUISITION_COLOUR = "#D55E00"
-_Y_MARGIN = 0.1  # of the data's span, above and below
+_Y_MARGIN = 0.1
+MARKER_SAMPLES = 80
 
 
 def _y_range(values_mA, full_scale_mA: float) -> tuple[float, float]:
@@ -27,25 +25,39 @@ def _y_range(values_mA, full_scale_mA: float) -> tuple[float, float]:
     return low - margin, high + margin
 
 
+def _show_samples(ax, dots, t_ms: np.ndarray) -> None:
+    """Dots on the samples only when few of them are in view."""
+    low, high = sorted(ax.get_xlim())
+    in_view = int(np.searchsorted(t_ms, high, "right") - np.searchsorted(t_ms, low, "left"))
+    dots.set_visible(in_view <= MARKER_SAMPLES)
+
+
 def plot_awg(
     waveform: AwgWaveform,
     fig: Figure | SubFigure | None = None,
     acquisition: tuple[float, float, tuple[int, ...]] | None = None,
+    show_title: bool = True,
 ) -> Figure | SubFigure:
     """Draw one row per AWG channel: current in mA versus time in ms after :AWG:RUN.
 
     The y range of every row fits its values. acquisition = (start_ms, end_ms, ADC
     channels) is drawn as a bar in a strip above the channels and as dashed lines at
     its start and end; the time axis shows the whole waveform and the start of the
-    acquisition (zoom out to see a longer acquisition to its end).
+    acquisition (zoom out to see a longer acquisition to its end). show_title=False
+    leaves out the title (for a panel that shows it itself).
+
+    The curves are drawn as the AWG outputs them: every sample is held until the next
+    one (steps), the last one until the end of the sequence. When at most
+    MARKER_SAMPLES samples are in view, dots mark the samples themselves.
     """
     if fig is None:
+        import matplotlib.pyplot as plt
+
         fig = plt.figure(figsize=(11, 7))
     n = len(waveform.ranges)
     if acquisition is None:
         axes = fig.subplots(n, 1, sharex=True)
     else:
-        # A thin strip above the channels shows the acquisition, so nothing covers the curves.
         strip, *axes = fig.subplots(n + 1, 1, sharex=True, height_ratios=[0.3] + [1] * n)
     t_ms = waveform.time_s() * 1000
     awg_end = waveform.duration_s * 1000
@@ -53,12 +65,16 @@ def plot_awg(
     if acquisition is not None:
         view_end = max(awg_end, min(acquisition[1], acquisition[0] + 0.25 * awg_end))
 
-    for ch, (ax, range_, colour) in enumerate(zip(axes, waveform.ranges, CHANNEL_COLOURS), start=1):
+    acquisition_colour = plot_style.CATEGORY_COLOURS["Acquisition"]
+    for ch, (ax, range_) in enumerate(zip(axes, waveform.ranges), start=1):
+        colour = plot_style.series(ch - 1)
         full_scale_mA = RANGE_FULL_SCALE_A[range_] * 1000
         values_mA = waveform.currents_A[:, ch - 1] * 1000
-        # Straight lines between the samples, not a staircase: the curve, not the DAC steps.
-        ax.plot(t_ms, values_mA, color=colour, linewidth=1.4, solid_joinstyle="round", antialiased=True)
-        ax.axhline(0, color="#D0D0D0", linewidth=0.8, zorder=0)
+        ax.plot(np.append(t_ms, awg_end), np.append(values_mA, values_mA[-1:]), drawstyle="steps-post",
+                color=colour, linewidth=1.4, antialiased=True)
+        (dots,) = ax.plot(t_ms, values_mA, "o", color=colour, markersize=4, visible=False)
+        ax.callbacks.connect("xlim_changed", lambda ax_, d=dots: _show_samples(ax_, d, t_ms))
+        ax.axhline(0, color=plot_style.GUIDE, linewidth=0.8, zorder=0)
         ax.set_ylim(*_y_range(values_mA, full_scale_mA))
         range_name = "LOW" if range_ == AwgRange.LOW else "HIGH"
         ax.set_ylabel(f"CH{ch} (mA)\n{range_name} ±{full_scale_mA:g}", fontsize=9)
@@ -68,29 +84,29 @@ def plot_awg(
 
     if acquisition is not None:
         start, end, channels = acquisition
-        strip.broken_barh([(start, end - start)], (0.2, 0.6), facecolors=ACQUISITION_COLOUR, alpha=0.35,
-                          edgecolors=ACQUISITION_COLOUR, linewidth=1.0)
+        strip.broken_barh([(start, end - start)], (0.2, 0.6), facecolors=acquisition_colour, alpha=0.35,
+                          edgecolors=acquisition_colour, linewidth=1.0)
         strip.set_ylim(0, 1)
         strip.set_yticks([])
         strip.tick_params(axis="x", bottom=False)
         for side in ("top", "right", "left"):
             strip.spines[side].set_visible(False)
-        # In the strip's title: it stays in place when the plot is zoomed or the window resized.
         strip.set_title(f"Acquisition CH {', '.join(map(str, channels))}: {start:g} – {end:g} ms",
-                        loc="left", fontsize=8, color=ACQUISITION_COLOUR, fontweight="bold", pad=2)
-        for ax in axes:  # thin lines only: the curves stay visible
-            ax.axvline(start, color=ACQUISITION_COLOUR, linewidth=1.0, linestyle="--", zorder=1)
-            ax.axvline(end, color=ACQUISITION_COLOUR, linewidth=1.0, linestyle="--", zorder=1)
+                        loc="left", fontsize=8, color=acquisition_colour, fontweight="bold", pad=2)
+        for ax in axes:
+            ax.axvline(start, color=acquisition_colour, linewidth=1.0, linestyle="--", zorder=1)
+            ax.axvline(end, color=acquisition_colour, linewidth=1.0, linestyle="--", zorder=1)
     axes[-1].set_xlim(-0.02 * view_end, view_end * 1.02)
     axes[-1].set_xlabel("Time after :AWG:RUN (ms)", fontweight="bold")
     name = waveform.source_path.name if waveform.source_path else "AWG sequence"
-    fig.suptitle(
-        f"AWG sequence — {name}  ({waveform.n_samples} samples, "
-        f"{waveform.sample_rate_hz:g} Hz, {waveform.duration_s * 1000:g} ms)",
-        fontweight="bold",
-    )
+    if show_title:
+        fig.suptitle(
+            f"AWG sequence — {name}  ({waveform.n_samples} samples, "
+            f"{waveform.sample_rate_hz:g} Hz, {waveform.duration_s * 1000:g} ms)",
+            fontweight="bold",
+        )
     if isinstance(fig, Figure) and fig.get_layout_engine() is None:
-        fig.tight_layout()  # sub-figures and constrained layouts arrange themselves
+        fig.tight_layout()
     return fig
 
 
@@ -99,10 +115,13 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("file", type=Path)
     parser.add_argument("-o", "--output", type=Path, help="save to file instead of showing a window")
     args = parser.parse_args(argv)
+    plot_style.apply()
     fig = plot_awg(load_awg_npz(args.file))
     if args.output:
         fig.savefig(args.output, dpi=150, bbox_inches="tight")
     else:
+        import matplotlib.pyplot as plt
+
         plt.show()
 
 

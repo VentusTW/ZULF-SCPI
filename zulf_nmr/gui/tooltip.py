@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import tkinter as tk
 
+from zulf_nmr.gui import theme
+
 DELAY_MS = 1000
 
 
@@ -33,10 +35,11 @@ class Tooltip:
             return
         x, y = self.widget.winfo_pointerxy()
         self._window = window = tk.Toplevel(self.widget)
-        window.wm_overrideredirect(True)  # no title bar
+        window.wm_overrideredirect(True)
         window.attributes("-topmost", True)
-        tk.Label(window, text=self.text, justify="left", background="#ffffe8", foreground="#222222",
-                 relief="solid", borderwidth=1, padx=6, pady=3, font=("Segoe UI", 9)).pack()
+        tk.Label(window, text=self.text, justify="left", background=theme.RAISED, foreground=theme.TEXT,
+                 highlightthickness=1, highlightbackground=theme.BORDER, borderwidth=0, padx=8, pady=4,
+                 font=theme.sans(9)).pack()
         window.wm_geometry(f"+{x + 12}+{y + 18}")
 
     def _hide(self, _event=None) -> None:

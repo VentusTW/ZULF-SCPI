@@ -15,18 +15,11 @@ from zulf_nmr.core.scpi import header_matches
 from zulf_nmr.experiment.parser import ExperimentConfig
 from zulf_nmr.experiment.sequence import acquisition_window_ms
 
-# Zero-field J-coupling line of a 13C-1H pair (e.g. 13C-formic acid).
 J_COUPLING_HZ = 222.0
-# Toy model of the shims: the current of shim channel n (:SHIM:CURRent n, <mA>)
-# leaves a residual field that shifts the line seen by ADC channel n by
-# SHIM_SHIFT_HZ_PER_MA x current. ADC channels without a shim are not shifted.
 SHIM_SHIFT_HZ_PER_MA = 2.0
-# Random change of every transient, drawn separately for each channel:
-PHASE_JITTER_DEG = 45.0  # phase offset within +/- this
-FREQUENCY_JITTER_HZ = 0.75  # line frequency within +/- this
-AMPLITUDE_JITTER = 0.75  # amplitude factor within 1 +/- this
-# A simulated transient is delivered in SIM_CHUNKS parts over SIM_TRANSIENT_S
-# seconds, so the GUI can show it filling up like a real acquisition.
+PHASE_JITTER_DEG = 45.0
+FREQUENCY_JITTER_HZ = 0.75
+AMPLITUDE_JITTER = 0.75
 SIM_TRANSIENT_S = 3.0
 SIM_CHUNKS = 30
 
@@ -37,11 +30,11 @@ def shim_currents_mA(config: ExperimentConfig) -> dict[int, float]:
     window = acquisition_window_ms(config)
     start = window[0] if window else float("inf")
     currents: dict[int, float] = {}
-    for event in config.events:  # sorted by time
+    for event in config.events:
         header, _, args = event.action.strip().partition(" ")
         if event.time_ms > start or not header_matches(header, ":SHIM:CURRent"):
             continue
-        channel, current = (a.strip() for a in args.split(","))  # validated by the parser
+        channel, current = (a.strip() for a in args.split(","))
         currents[int(channel)] = float(current)
     return currents
 

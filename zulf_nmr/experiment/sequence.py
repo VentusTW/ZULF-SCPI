@@ -33,9 +33,9 @@ class _RecordingConnection:
 class CompiledSequence:
     """SCPI commands that run one experiment, in the order they must be sent."""
 
-    setup: tuple[str, ...]  # clear the old sequence, configure the acquisition
-    events: tuple[str, ...]  # :SEQuence:ADD <time>,'<event>' for every event
-    start: str  # software trigger
+    setup: tuple[str, ...]
+    events: tuple[str, ...]
+    start: str
 
     def commands(self) -> list[str]:
         return [*self.setup, *self.events, self.start]
@@ -68,7 +68,7 @@ def acquisition_window_ms(config: ExperimentConfig) -> tuple[float, float] | Non
     """
     acq = config.acquisition
     duration_ms = acq.duration_s(config.hardware_parameters.acq_sample_rate_hz) * 1000
-    for event in config.events:  # sorted by time
+    for event in config.events:
         header = event.action.strip().split(" ", 1)[0]
         if header_matches(header, ":AWG:RUN"):
             start = event.time_ms + acq.start_us / 1000
@@ -94,14 +94,12 @@ def compile_experiment(config: ExperimentConfig) -> CompiledSequence:
 
     sequencer.reset()
     acquisition.set_sample_rate(hw.acq_sample_rate_hz)
-    # The device takes a duration in ms; it is rounded up so that at least
-    # number_of_samples are recorded (the runner keeps exactly that many).
     acquisition.set_duration(duration_for_samples(acq.number_of_samples, hw.acq_sample_rate_hz))
-    acquisition.set_autostart(acq.start_us, enable=True)  # us after :AWG:RUN
+    acquisition.set_autostart(acq.start_us, enable=True)
     setup = tuple(rec.commands)
 
     rec.commands.clear()
-    for event in config.events:  # already sorted by time_ms
+    for event in config.events:
         sequencer.add(event.time_ms, canonical_event(event.action))
     events = tuple(rec.commands)
 

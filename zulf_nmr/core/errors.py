@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import re
 
-# Windows error codes (GetLastError / OSError.winerror)
 WINDOWS_ERRORS = {
     2: "not found (no such file, or no such port - is the device connected?)",
     3: "the path was not found",
@@ -28,7 +27,6 @@ WINDOWS_ERRORS = {
     995: "the operation was aborted",
     1167: "the device is not connected",
 }
-# C library error numbers (OSError.errno)
 ERRNO_ERRORS = {
     2: "no such file or directory",
     5: "input/output error",
@@ -39,9 +37,7 @@ ERRNO_ERRORS = {
     28: "no space left on the device",
 }
 
-# FileNotFoundError(2, 'localised text', None, 2) - how pyserial nests the system error
 _NESTED = re.compile(r"\w*Error\((\d+), '(?:[^'\\]|\\.)*'(?:, None, (\d+))?\)")
-# [WinError 5] localised text  /  [Errno 2] text   (as str(OSError) starts)
 _WIN = re.compile(r"\[WinError (\d+)\] [^:'\"\r\n]*")
 _ERRNO = re.compile(r"\[Errno (\d+)\] [^:'\"\r\n]*")
 
@@ -57,8 +53,6 @@ def _describe(winerror: int | None, errno: int | None) -> str:
 
 def english_error(error: BaseException) -> str:
     """The message of error with every operating-system description in English."""
-    # An OSError raised by the system itself (errno + its text); pyserial's errors carry
-    # only a message, which english_text() handles.
     if isinstance(error, OSError) and (getattr(error, "winerror", None) or error.errno) and len(error.args) >= 2:
         text = _describe(getattr(error, "winerror", None), error.errno)
         if error.filename:
