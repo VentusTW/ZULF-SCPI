@@ -28,6 +28,9 @@ MAX_LINE_POINTS = 600_000
 MAX_MAP_CELLS = 8_000_000
 COARSE_POINTS = 2_500
 COARSE_LINES = 40
+TURN_STEP_DEG = 25.0
+FULL_AFTER_TURN_MS = 600
+START_VIEW = (30.0, -37.5)
 MODES = ("Signal", "Spectrum")
 STYLES = ("Map", "Mesh", "Surface", "Lines")
 BUDGETS = {"Map": MAX_MAP_CELLS, "Mesh": MAX_CELLS, "Surface": MAX_CELLS, "Lines": MAX_LINE_POINTS}
@@ -110,6 +113,8 @@ class ThreeDView(ttk.Frame):
         self._filling = False
         self._full_artist = self._coarse_artist = None
         self._turning = self._coarse_shown = False
+        self._view = START_VIEW
+        self._full_pending: str | None = None
 
         bar = theme.card(self, padding=10)
         bar.pack(side="top", fill="x")
@@ -165,12 +170,70 @@ class ThreeDView(ttk.Frame):
         toolbar.update()
         theme.style_toolbar(toolbar)
         toolbar.pack(side="bottom", fill="x")
+        self._turn_buttons = self._build_turn_buttons(plot.body)
         theme.figure_widget(self._canvas).pack(side="top", fill="both", expand=True)
         self._axis_drag = AxisDrag(self._canvas, toolbar)
         self._canvas.mpl_connect("button_press_event", self._press)
         self._canvas.mpl_connect("motion_notify_event", self._motion)
         self._canvas.mpl_connect("button_release_event", self._release)
         self._mode_changed()
+
+    def _build_turn_buttons(self, parent: tk.Misc) -> list[ttk.Button]:
+        """Arrows beside the plot that turn the 3D view by TURN_STEP_DEG, and one back to the start view."""
+        pad = ttk.Frame(parent, style="Card.TFrame")
+        pad.pack(side="right", fill="y", padx=(8, 0))
+        cross = ttk.Frame(pad, style="Card.TFrame")
+        cross.pack(side="top", expand=True)
+        buttons = []
+        for text, row, col, turn, tip in (("▲", 0, 1, (TURN_STEP_DEG, 0.0), "Turn up"),
+                                          ("◀", 1, 0, (0.0, -TURN_STEP_DEG), "Turn left"),
+                                          ("⟲", 1, 1, None, "Start view"),
+                                          ("▶", 1, 2, (0.0, TURN_STEP_DEG), "Turn right"),
+                                          ("▼", 2, 1, (-TURN_STEP_DEG, 0.0), "Turn down")):
+            button = ttk.Button(cross, text=text, width=3, style="Small.TButton", command=lambda t=turn: self.turn(t))
+            button.grid(row=row, column=col, padx=1, pady=1)
+            Tooltip(button, f"{tip} ({TURN_STEP_DEG:g}°)" if turn else tip)
+            buttons.append(button)
+        return buttons
+
+    def _ax3d(self):
+        return next((ax for ax in self._figure.axes if ax.name == "3d"), None)
+
+    def turn(self, step: tuple[float, float] | None) -> None:
+        """Turn the 3D plot by (elevation, azimuth) degrees; None goes back to the start view.
+        The coarse copy is shown at once and the full plot FULL_AFTER_TURN_MS after the last
+        click, so that several clicks in a row do not wait for full redraws."""
+        ax = self._ax3d()
+        if ax is None:
+            return
+        self._cancel_full()
+        if self._coarse_artist is not None:
+            self._show_coarse(True)
+            self._full_pending = self.after(FULL_AFTER_TURN_MS, self._full_after_turn)
+        if step is None:
+            elev, azim = START_VIEW
+        else:
+            elev = max(-90.0, min(90.0, ax.elev + step[0]))
+            azim = (ax.azim + step[1] + 180.0) % 360.0 - 180.0
+        ax.view_init(elev=elev, azim=azim)
+        self._view = (elev, azim)
+        self._canvas.draw_idle()
+
+    def _cancel_full(self) -> None:
+        if self._full_pending is not None:
+            self.after_cancel(self._full_pending)
+            self._full_pending = None
+
+    def _full_after_turn(self) -> None:
+        self._full_pending = None
+        if self._coarse_shown and not self._turning:
+            self._show_coarse(False)
+            self._canvas.draw_idle()
+
+    def _update_turn_buttons(self) -> None:
+        state = ["!disabled"] if self._ax3d() is not None else ["disabled"]
+        for button in self._turn_buttons:
+            button.state(state)
 
     def restyle(self) -> None:
         self.draw()
@@ -259,6 +322,10 @@ class ThreeDView(ttk.Frame):
         or more, an ordinary 2D plot of one."""
         transients = self._transients()
         figure = self._figure
+        ax = self._ax3d()
+        if ax is not None:
+            self._view = (ax.elev, ax.azim)
+        self._cancel_full()
         figure.clear()
         figure.set_facecolor(plot_style.PANEL)
         self._full_artist = self._coarse_artist = None
@@ -309,6 +376,7 @@ class ThreeDView(ttk.Frame):
         self._info.config(text=f"{self._channel.get()} · {len(numbers)} transient(s) ({shown}) x {drawn_points} "
                                f"points{note}",
                           foreground=theme.WARNING if reduced else theme.MUTED)
+        self._update_turn_buttons()
         self._canvas.draw_idle()
 
     def _draw_map(self, x: np.ndarray, numbers: np.ndarray, values: np.ndarray, cmap, signal: bool) -> int:
@@ -374,12 +442,13 @@ class ThreeDView(ttk.Frame):
         ax.yaxis.set_major_locator(MaxNLocator(integer=True))
         ax.set_zlabel("Signal" if signal else "Amplitude", labelpad=8)
         ax.tick_params(labelsize=7)
-        ax.view_init(elev=30, azim=-37.5)
+        ax.view_init(elev=self._view[0], azim=self._view[1])
         self._figure.colorbar(_mappable(cmap, norm), ax=ax, shrink=0.55, pad=0.08).ax.tick_params(labelsize=7)
         self._figure.subplots_adjust(left=0, right=0.95, bottom=0, top=1)
         return drawn_points
 
     def _press(self, event) -> None:
+        self._cancel_full()
         self._turning = (self._coarse_artist is not None and event.button in (1, 3) and event.inaxes is not None
                          and event.inaxes.name == "3d" and not self._toolbar.mode)
 
@@ -421,9 +490,11 @@ class ThreeDView(ttk.Frame):
         self._figure.subplots_adjust(left=0.07, right=0.98, bottom=0.1, top=0.92)
         self._info.config(text=f"{self._channel.get()} · transient {number} x {len(xs)} points (2D: one transient)",
                           foreground=theme.MUTED)
+        self._update_turn_buttons()
         self._canvas.draw_idle()
 
     def _message(self, text: str) -> None:
+        self._update_turn_buttons()
         self._info.config(text=text, foreground=theme.MUTED)
         self._canvas.draw_idle()
 
