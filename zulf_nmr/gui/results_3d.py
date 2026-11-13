@@ -1,6 +1,7 @@
-"""Experimental view of all single transients of one set: a map (time or frequency across,
-transient up, the value as the colour) or a 3D grid like MATLAB's mesh and surf (the value
-as the height, coloured by the height)."""
+"""Experimental 3D view of the single transients of one set, like MATLAB's mesh and surf:
+the transients are joined into one 3D grid - time (or frequency) on the x axis, the
+transient number on the y axis and the value as the height, coloured by the height.
+The arrows beside the plot turn it, as does dragging it."""
 
 from __future__ import annotations
 
@@ -16,25 +17,22 @@ from matplotlib.colors import Normalize
 from matplotlib.figure import Figure
 from matplotlib.ticker import MaxNLocator
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
+from PIL import Image, ImageDraw, ImageTk
 
 from zulf_nmr.gui import theme
-from zulf_nmr.gui.axis_drag import AxisDrag
 from zulf_nmr.gui.tooltip import Tooltip
 from zulf_nmr.utils.visualization import plot_style
 from zulf_nmr.utils.visualization.results_plotter import spectrum
 
 MAX_CELLS = 150_000
 MAX_LINE_POINTS = 600_000
-MAX_MAP_CELLS = 8_000_000
-COARSE_POINTS = 2_500
-COARSE_LINES = 40
-TURN_STEP_DEG = 25.0
-FULL_AFTER_TURN_MS = 600
-START_VIEW = (30.0, -37.5)
 MODES = ("Signal", "Spectrum")
-STYLES = ("Map", "Mesh", "Surface", "Lines")
-BUDGETS = {"Map": MAX_MAP_CELLS, "Mesh": MAX_CELLS, "Surface": MAX_CELLS, "Lines": MAX_LINE_POINTS}
+STYLES = ("Mesh", "Surface", "Lines")
 COLOUR_MAPS = ("jet", "turbo", "viridis", "plasma")
+TURN_STEP_DEG = 25.0
+START_VIEW = (30.0, -37.5)
+ROUND_BUTTON_PX = 30
+ROUND_BUTTON_OVERSAMPLE = 4
 
 
 def binned(x: np.ndarray, y: np.ndarray, points: int, peak: bool) -> tuple[np.ndarray, np.ndarray]:
@@ -64,33 +62,100 @@ def envelope(x: np.ndarray, y: np.ndarray, points: int) -> tuple[np.ndarray, np.
     return np.repeat(x[starts], 2), np.column_stack([lows, highs]).ravel()
 
 
-def coarse_indices(shape: tuple[int, int], cells: int) -> tuple[np.ndarray, np.ndarray]:
-    """Evenly spread rows and columns of a grid, both ends kept, about `cells` in all."""
-    n_rows, n_cols = shape
-    rows = max(2, min(n_rows, int(np.sqrt(cells * n_rows / n_cols))))
-    cols = max(2, min(n_cols, cells // rows))
-    return (np.unique(np.linspace(0, n_rows - 1, rows).round().astype(int)),
-            np.unique(np.linspace(0, n_cols - 1, cols).round().astype(int)))
+class RoundButton(tk.Canvas):
+    """A round button drawn smooth (antialiased) in the theme's colours, with an arrow
+    (text "up", "down", "left" or "right") or a text symbol; state() and instate() as on
+    a ttk button, for "disabled"."""
+
+    def __init__(self, parent: tk.Misc, text: str, command: Callable[[], None]) -> None:
+        size = ROUND_BUTTON_PX
+        super().__init__(parent, width=size, height=size, highlightthickness=0, borderwidth=0, cursor="hand2")
+        self._command = command
+        self._arrow = text if text in ARROWS else None
+        self._disabled = self._hover = self._pressed = False
+        self._images: dict[str, ImageTk.PhotoImage] = {}
+        self._circle = self.create_image(size // 2, size // 2)
+        self._symbol = self.create_text(size // 2, size // 2, text="" if self._arrow else text, font=theme.sans(11))
+        self.bind("<Enter>", lambda _e: self._set(hover=True))
+        self.bind("<Leave>", lambda _e: self._set(hover=False, pressed=False))
+        self.bind("<ButtonPress-1>", lambda _e: self._set(pressed=True))
+        self.bind("<ButtonRelease-1>", self._release)
+        self.recolor({})
+
+    def recolor(self, _mapping: dict[str, str]) -> None:
+        """Draw the circles again in the current theme's colours."""
+        self._images = {state: _circle_image(fill, border, self._arrow, symbol) for state, fill, border, symbol in (
+            ("normal", theme.RAISED, theme.BORDER, theme.TEXT), ("hover", theme.RAISED_HOVER, theme.ACCENT, theme.ACCENT),
+            ("pressed", theme.SELECTION, theme.ACCENT, theme.ACCENT), ("disabled", theme.SURFACE, theme.BORDER, theme.DIM))}
+        self.config(background=theme.PANEL)
+        self._paint()
+
+    def state(self, states: list[str]) -> None:
+        if "disabled" in states:
+            self._set(disabled=True)
+        elif "!disabled" in states:
+            self._set(disabled=False)
+
+    def instate(self, states: list[str]) -> bool:
+        return all(self._disabled if s == "disabled" else not self._disabled for s in states
+                   if s in ("disabled", "!disabled"))
+
+    def invoke(self) -> None:
+        if not self._disabled:
+            self._command()
+
+    def _release(self, event) -> None:
+        inside = 0 <= event.x < self.winfo_width() and 0 <= event.y < self.winfo_height()
+        was_pressed = self._pressed
+        self._set(pressed=False)
+        if was_pressed and inside:
+            self.invoke()
+
+    def _set(self, **flags: bool) -> None:
+        for name, value in flags.items():
+            setattr(self, f"_{name}", value)
+        self._paint()
+
+    def _paint(self) -> None:
+        state = ("disabled" if self._disabled else "pressed" if self._pressed and self._hover
+                 else "hover" if self._hover else "normal")
+        self.itemconfigure(self._circle, image=self._images[state])
+        self.itemconfigure(self._symbol, fill=theme.DIM if self._disabled else
+                           theme.ACCENT if state != "normal" else theme.TEXT)
+        self.config(cursor="arrow" if self._disabled else "hand2")
 
 
-def coarse_lines(segments: list[np.ndarray]) -> list[np.ndarray]:
-    """At most COARSE_LINES of the lines, with about COARSE_POINTS points in all."""
-    picked = [segments[i] for i in np.unique(np.linspace(0, len(segments) - 1,
-                                                         min(len(segments), COARSE_LINES)).round().astype(int))]
-    step = max(1, int(np.ceil(sum(len(s) for s in picked) / COARSE_POINTS)))
-    return [s[::step] for s in picked]
+ARROWS = {"up": ((-1.0, 0.5), (0.0, -0.5), (1.0, 0.5)), "down": ((-1.0, -0.5), (0.0, 0.5), (1.0, -0.5)),
+          "left": ((0.5, -1.0), (-0.5, 0.0), (0.5, 1.0)), "right": ((-0.5, -1.0), (0.5, 0.0), (-0.5, 1.0))}
+ARROW_RADIUS = 0.2
+ARROW_STROKE_PX = 2.2
+
+
+def _circle_image(fill: str, border: str, arrow: str | None, symbol: str) -> ImageTk.PhotoImage:
+    """A filled circle with a 1 px border and the arrow (a chevron pointing that way, with
+    rounded ends), drawn large and scaled down so the edges are smooth."""
+    big = ROUND_BUTTON_PX * ROUND_BUTTON_OVERSAMPLE
+    image = Image.new("RGBA", (big, big), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(image)
+    draw.ellipse((0, 0, big - 1, big - 1), fill=fill, outline=border, width=ROUND_BUTTON_OVERSAMPLE)
+    if arrow:
+        centre, radius = big / 2, big * ARROW_RADIUS
+        stroke = round(ARROW_STROKE_PX * ROUND_BUTTON_OVERSAMPLE)
+        points = [(centre + radius * dx, centre + radius * dy) for dx, dy in ARROWS[arrow]]
+        draw.line(points, fill=symbol, width=stroke, joint="curve")
+        for x, y in (points[0], points[-1]):
+            draw.ellipse((x - stroke / 2, y - stroke / 2, x + stroke / 2, y + stroke / 2), fill=symbol)
+    return ImageTk.PhotoImage(image.resize((ROUND_BUTTON_PX, ROUND_BUTTON_PX), Image.LANCZOS))
 
 
 class ThreeDView(ttk.Frame):
-    """A tab with the map or the 3D plot of one set's transients; "Draw" reads them again
-    (also those that arrived since).
+    """A tab with the 3D plot of one set's transients; "Draw" reads them again (also those
+    that arrived since).
 
     "Transients" (from - to, by number) and "Points" follow the data (all transients of
     the set, all samples or frequencies in the range) until the user types a number;
-    "Auto" makes them follow again. One transient is drawn as an ordinary 2D plot. More
-    data than BUDGETS allows for the plot is drawn with fewer points, as the line above the
-    plot says, unless "Full resolution" is ticked. A 3D plot is turned with a coarse copy
-    of itself and drawn in full again when the mouse button is released."""
+    "Auto" makes them follow again. One transient is drawn as an ordinary 2D plot. A grid too big to turn smoothly (more than MAX_CELLS cells) is drawn with
+    fewer points, as the line above the plot says, unless "Full resolution" is ticked."""
 
     def __init__(self, parent: tk.Misc, transients: Callable[[], list[tuple[int, np.ndarray]]],
                  sample_rate_hz: float, channels: tuple[int, ...], start_s: float, title: str) -> None:
@@ -111,10 +176,7 @@ class ThreeDView(ttk.Frame):
         self._full = tk.BooleanVar(value=False)
         self._auto = True
         self._filling = False
-        self._full_artist = self._coarse_artist = None
-        self._turning = self._coarse_shown = False
         self._view = START_VIEW
-        self._full_pending: str | None = None
 
         bar = theme.card(self, padding=10)
         bar.pack(side="top", fill="x")
@@ -166,33 +228,29 @@ class ThreeDView(ttk.Frame):
         self._info.pack(side="top", anchor="w")
         self._figure = Figure(figsize=(10, 7))
         self._canvas = FigureCanvasTkAgg(self._figure, master=plot.body)
-        self._toolbar = toolbar = NavigationToolbar2Tk(self._canvas, plot.body, pack_toolbar=False)
+        toolbar = NavigationToolbar2Tk(self._canvas, plot.body, pack_toolbar=False)
         toolbar.update()
         theme.style_toolbar(toolbar)
         toolbar.pack(side="bottom", fill="x")
         self._turn_buttons = self._build_turn_buttons(plot.body)
         theme.figure_widget(self._canvas).pack(side="top", fill="both", expand=True)
-        self._axis_drag = AxisDrag(self._canvas, toolbar)
-        self._canvas.mpl_connect("button_press_event", self._press)
-        self._canvas.mpl_connect("motion_notify_event", self._motion)
-        self._canvas.mpl_connect("button_release_event", self._release)
         self._mode_changed()
 
-    def _build_turn_buttons(self, parent: tk.Misc) -> list[ttk.Button]:
+    def _build_turn_buttons(self, parent: tk.Misc) -> list[RoundButton]:
         """Arrows beside the plot that turn the 3D view by TURN_STEP_DEG, and one back to the start view."""
         pad = ttk.Frame(parent, style="Card.TFrame")
         pad.pack(side="right", fill="y", padx=(8, 0))
         cross = ttk.Frame(pad, style="Card.TFrame")
         cross.pack(side="top", expand=True)
         buttons = []
-        for text, row, col, turn, tip in (("▲", 0, 1, (TURN_STEP_DEG, 0.0), "Turn up"),
-                                          ("◀", 1, 0, (0.0, -TURN_STEP_DEG), "Turn left"),
+        for text, row, col, step, tip in (("up", 0, 1, (TURN_STEP_DEG, 0.0), "Turn up"),
+                                          ("left", 1, 0, (0.0, -TURN_STEP_DEG), "Turn left"),
                                           ("⟲", 1, 1, None, "Start view"),
-                                          ("▶", 1, 2, (0.0, TURN_STEP_DEG), "Turn right"),
-                                          ("▼", 2, 1, (-TURN_STEP_DEG, 0.0), "Turn down")):
-            button = ttk.Button(cross, text=text, width=3, style="Small.TButton", command=lambda t=turn: self.turn(t))
-            button.grid(row=row, column=col, padx=1, pady=1)
-            Tooltip(button, f"{tip} ({TURN_STEP_DEG:g}°)" if turn else tip)
+                                          ("right", 1, 2, (0.0, TURN_STEP_DEG), "Turn right"),
+                                          ("down", 2, 1, (-TURN_STEP_DEG, 0.0), "Turn down")):
+            button = RoundButton(cross, text, command=lambda s=step: self.turn(s))
+            button.grid(row=row, column=col, padx=2, pady=2)
+            Tooltip(button, f"{tip} ({TURN_STEP_DEG:g}°)" if step else tip)
             buttons.append(button)
         return buttons
 
@@ -200,16 +258,10 @@ class ThreeDView(ttk.Frame):
         return next((ax for ax in self._figure.axes if ax.name == "3d"), None)
 
     def turn(self, step: tuple[float, float] | None) -> None:
-        """Turn the 3D plot by (elevation, azimuth) degrees; None goes back to the start view.
-        The coarse copy is shown at once and the full plot FULL_AFTER_TURN_MS after the last
-        click, so that several clicks in a row do not wait for full redraws."""
+        """Turn the 3D plot by (elevation, azimuth) degrees; None goes back to the start view."""
         ax = self._ax3d()
         if ax is None:
             return
-        self._cancel_full()
-        if self._coarse_artist is not None:
-            self._show_coarse(True)
-            self._full_pending = self.after(FULL_AFTER_TURN_MS, self._full_after_turn)
         if step is None:
             elev, azim = START_VIEW
         else:
@@ -218,17 +270,6 @@ class ThreeDView(ttk.Frame):
         ax.view_init(elev=elev, azim=azim)
         self._view = (elev, azim)
         self._canvas.draw_idle()
-
-    def _cancel_full(self) -> None:
-        if self._full_pending is not None:
-            self.after_cancel(self._full_pending)
-            self._full_pending = None
-
-    def _full_after_turn(self) -> None:
-        self._full_pending = None
-        if self._coarse_shown and not self._turning:
-            self._show_coarse(False)
-            self._canvas.draw_idle()
 
     def _update_turn_buttons(self) -> None:
         state = ["!disabled"] if self._ax3d() is not None else ["disabled"]
@@ -318,18 +359,15 @@ class ThreeDView(ttk.Frame):
         return (x if x is not None else np.array([])), numbers, np.array(rows)
 
     def draw(self) -> None:
-        """Read the transients and draw those in the chosen range: a map or a 3D plot of two
-        or more, an ordinary 2D plot of one."""
+        """Read the transients and draw those in the chosen range: a 3D plot of two or more,
+        an ordinary 2D plot of one."""
         transients = self._transients()
         figure = self._figure
         ax = self._ax3d()
         if ax is not None:
             self._view = (ax.elev, ax.azim)
-        self._cancel_full()
         figure.clear()
         figure.set_facecolor(plot_style.PANEL)
-        self._full_artist = self._coarse_artist = None
-        self._turning = self._coarse_shown = False
         column = self._channel_numbers.index(int(self._channel.get()[2:])) if self._channel.get() else 0
         style = self._style.get()
         numbers_all = [n for n, _ in transients]
@@ -352,7 +390,7 @@ class ThreeDView(ttk.Frame):
             return self._draw_2d(in_range[0], column, wanted_points)
 
         most, points = len(in_range), wanted_points
-        budget = BUDGETS[style]
+        budget = MAX_LINE_POINTS if style == "Lines" else MAX_CELLS
         reduced = not self._full.get() and most * points > budget
         if reduced:
             points = max(budget // most, min(points, 50))
@@ -363,77 +401,43 @@ class ThreeDView(ttk.Frame):
         if len(chosen) < 2:
             chosen = [in_range[0], in_range[-1]]
         x, numbers, values = self._grid(chosen, column, points)
-        cmap = colormaps[self._colours.get() or "jet"]
-        signal = self._mode.get() == "Signal"
-        if style == "Map":
-            drawn_points = self._draw_map(x, numbers, values, cmap, signal)
-        else:
-            drawn_points = self._draw_3d(x, numbers, values, cmap, signal, style)
-        if not drawn_points:
-            return self._message("Nothing in the chosen range.")
-        shown = (f"{first}–{last}" if step == 1 else f"every {step}. of {first}–{last}")
-        note = f" - fewer than the {len(in_range)} x {wanted_points} asked for" if reduced else ""
-        self._info.config(text=f"{self._channel.get()} · {len(numbers)} transient(s) ({shown}) x {drawn_points} "
-                               f"points{note}",
-                          foreground=theme.WARNING if reduced else theme.MUTED)
-        self._update_turn_buttons()
-        self._canvas.draw_idle()
-
-    def _draw_map(self, x: np.ndarray, numbers: np.ndarray, values: np.ndarray, cmap, signal: bool) -> int:
-        """A 2D map: time (or frequency) across, transient up, the value as the colour.
-        Returns the points drawn per transient (0: nothing to draw)."""
-        if values.size == 0 or len(x) < 2:
-            return 0
-        half_x = (x[-1] - x[0]) / (len(x) - 1) / 2
-        half_y = (numbers[-1] - numbers[0]) / (len(numbers) - 1) / 2
-        ax = self._figure.add_subplot()
-        image = ax.imshow(values, aspect="auto", origin="lower", interpolation="nearest", cmap=cmap,
-                          extent=(x[0] - half_x, x[-1] + half_x, numbers[0] - half_y, numbers[-1] + half_y))
-        ax.set_xlabel("Time from the start of the sequence (s)" if signal else "Frequency (Hz)")
-        ax.set_ylabel("Transient")
-        ax.yaxis.set_major_locator(MaxNLocator(integer=True))
-        self._figure.colorbar(image, ax=ax, pad=0.02).set_label("Signal" if signal else "Amplitude")
-        self._figure.subplots_adjust(left=0.07, right=0.99, bottom=0.1, top=0.97)
-        return len(x)
-
-    def _draw_3d(self, x: np.ndarray, numbers: np.ndarray, values, cmap, signal: bool, style: str) -> int:
-        """Mesh, Surface or Lines in 3D, with a coarse copy that is shown while the plot is
-        turned. Returns the points drawn per transient (0: nothing to draw)."""
-        ax = self._figure.add_subplot(projection="3d")
+        ax = figure.add_subplot(projection="3d")
         ax.set_facecolor(plot_style.PANEL)
         for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
             axis.set_pane_color(plot_style.PLOT_BACKGROUND)
             axis._axinfo["grid"]["color"] = plot_style.GRID
             axis._axinfo["grid"]["linewidth"] = 0.4
             axis._axinfo["grid"]["linestyle"] = ":"
+        cmap = colormaps[self._colours.get() or "jet"]
+        signal = self._mode.get() == "Signal"
         if style == "Lines":
             segments = [np.column_stack([xs, np.full(len(xs), n), ys]) for (xs, ys), n in zip(values, numbers)
                         if len(xs)]
             if not segments:
-                return 0
+                return self._message("Nothing in the chosen range.")
             all_z = np.concatenate([s[:, 2] for s in segments])
             norm = Normalize(all_z.min(), all_z.max())
-            self._full_artist = _lines(ax, segments, cmap, norm)
-            if sum(len(s) for s in segments) > COARSE_POINTS:
-                self._coarse_artist = _lines(ax, coarse_lines(segments), cmap, norm)
+            colours = cmap(norm([s[:, 2].max() for s in segments]))
+            ax.add_collection3d(Line3DCollection(segments, colors=colours, linewidths=0.8))
             all_x = np.concatenate([s[:, 0] for s in segments])
             ax.set_xlim(all_x.min(), all_x.max())
             z_low, z_high = all_z.min(), all_z.max()
-            drawn_points = max(len(s) for s in segments)
         else:
             if values.size == 0 or len(x) < 2:
-                return 0
+                return self._message("Nothing in the chosen range.")
+            grid_x, grid_y = np.meshgrid(x, numbers)
             norm = Normalize(values.min(), values.max())
-            self._full_artist = _surface(ax, x, numbers, values, style, cmap, norm)
-            if values.size > COARSE_POINTS:
-                rows, cols = coarse_indices(values.shape, COARSE_POINTS)
-                self._coarse_artist = _surface(ax, x[cols], numbers[rows], values[np.ix_(rows, cols)], style, cmap,
-                                               norm)
+            if style == "Mesh":
+                surface = ax.plot_surface(grid_x, grid_y, values, rstride=1, cstride=1, linewidth=0.7,
+                                          antialiased=True, shade=False)
+                faces = (values[:-1, :-1] + values[1:, :-1] + values[:-1, 1:] + values[1:, 1:]) / 4
+                surface.set_facecolor(plot_style.PLOT_BACKGROUND)
+                surface.set_edgecolor(cmap(norm(faces.ravel())))
+            else:
+                ax.plot_surface(grid_x, grid_y, values, rstride=1, cstride=1, cmap=cmap, norm=norm,
+                                linewidth=0.2, edgecolor=plot_style.GRID, antialiased=True, shade=True)
             ax.set_xlim(x.min(), x.max())
             z_low, z_high = values.min(), values.max()
-            drawn_points = len(x)
-        if self._coarse_artist is not None:
-            self._coarse_artist.set_visible(False)
         pad = (z_high - z_low) * 0.05 or 1.0
         ax.set_zlim(z_low - pad, z_high + pad)
         ax.set_ylim(numbers.min(), numbers.max())
@@ -443,31 +447,17 @@ class ThreeDView(ttk.Frame):
         ax.set_zlabel("Signal" if signal else "Amplitude", labelpad=8)
         ax.tick_params(labelsize=7)
         ax.view_init(elev=self._view[0], azim=self._view[1])
-        self._figure.colorbar(_mappable(cmap, norm), ax=ax, shrink=0.55, pad=0.08).ax.tick_params(labelsize=7)
-        self._figure.subplots_adjust(left=0, right=0.95, bottom=0, top=1)
-        return drawn_points
-
-    def _press(self, event) -> None:
-        self._cancel_full()
-        self._turning = (self._coarse_artist is not None and event.button in (1, 3) and event.inaxes is not None
-                         and event.inaxes.name == "3d" and not self._toolbar.mode)
-
-    def _motion(self, _event) -> None:
-        if self._turning and not self._coarse_shown:
-            self._show_coarse(True)
-
-    def _release(self, _event) -> None:
-        self._turning = False
-        if self._coarse_shown:
-            self._show_coarse(False)
-            self._canvas.draw_idle()
-
-    def _show_coarse(self, coarse: bool) -> None:
-        """While the plot is turned the coarse copy is drawn, a few thousand points, so that
-        it follows the mouse; the full one again once the button is released."""
-        self._coarse_shown = coarse
-        self._full_artist.set_visible(not coarse)
-        self._coarse_artist.set_visible(coarse)
+        figure.colorbar(ax.collections[0] if style == "Surface" else _mappable(cmap, norm), ax=ax, shrink=0.55,
+                        pad=0.08).ax.tick_params(labelsize=7)
+        figure.subplots_adjust(left=0, right=0.95, bottom=0, top=1)
+        shown = (f"{first}–{last}" if step == 1 else f"every {step}. of {first}–{last}")
+        drawn_points = len(x) if style != "Lines" else max(len(xs) for xs, _ys in values)
+        note = f" - fewer than the {len(in_range)} x {wanted_points} asked for" if reduced else ""
+        self._info.config(text=f"{self._channel.get()} · {len(numbers)} transient(s) ({shown}) x {drawn_points} "
+                               f"points{note}",
+                          foreground=theme.WARNING if reduced else theme.MUTED)
+        self._update_turn_buttons()
+        self._canvas.draw_idle()
 
     def _draw_2d(self, transient: tuple[int, np.ndarray], column: int, points: int) -> None:
         """One transient: an ordinary plot of its value against time (or frequency)."""
@@ -497,27 +487,6 @@ class ThreeDView(ttk.Frame):
         self._update_turn_buttons()
         self._info.config(text=text, foreground=theme.MUTED)
         self._canvas.draw_idle()
-
-
-def _surface(ax, x: np.ndarray, numbers: np.ndarray, values: np.ndarray, style: str, cmap, norm):
-    """A mesh (lines coloured by the height on the background) or a coloured surface."""
-    grid_x, grid_y = np.meshgrid(x, numbers)
-    if style == "Mesh":
-        surface = ax.plot_surface(grid_x, grid_y, values, rstride=1, cstride=1, linewidth=0.7,
-                                  antialiased=True, shade=False)
-        faces = (values[:-1, :-1] + values[1:, :-1] + values[:-1, 1:] + values[1:, 1:]) / 4
-        surface.set_facecolor(plot_style.PLOT_BACKGROUND)
-        surface.set_edgecolor(cmap(norm(faces.ravel())))
-        return surface
-    return ax.plot_surface(grid_x, grid_y, values, rstride=1, cstride=1, cmap=cmap, norm=norm,
-                           linewidth=0.2, edgecolor=plot_style.GRID, antialiased=True, shade=True)
-
-
-def _lines(ax, segments: list[np.ndarray], cmap, norm) -> Line3DCollection:
-    """One line per transient, coloured by its highest value."""
-    lines = Line3DCollection(segments, colors=cmap(norm([s[:, 2].max() for s in segments])), linewidths=0.8)
-    ax.add_collection3d(lines)
-    return lines
 
 
 def _mappable(cmap, norm) -> ScalarMappable:

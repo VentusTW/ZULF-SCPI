@@ -706,7 +706,7 @@ class TransientBrowser:
         if on_3d is not None:
             three_d = ttk.Button(picker, text="3D", style="Small.TButton", command=lambda: on_3d(self))
             three_d.pack(side="left", padx=(6, 0))
-            Tooltip(three_d, "Experimental: all transients of this set as a map or a 3D plot")
+            Tooltip(three_d, "Experimental: all transients of this set in one 3D plot")
         Tooltip(self._entry, "Type a transient number and press Enter")
         for widget in (picker, *picker.winfo_children()):
             widget.bind("<MouseWheel>", lambda e: on_scroll and on_scroll(e.delta / 120), add="+")
