@@ -101,6 +101,17 @@ class _SegmentVars:
         return Segment(self.formula.get(), self.start.get(), self.stop.get())
 
 
+ORDER_FLASH_MS = 900
+
+
+def _ms(text: str) -> float | None:
+    """A time typed as a plain number of ms; None for an empty field or anything else."""
+    try:
+        return float(text.strip().replace(",", "."))
+    except ValueError:
+        return None
+
+
 class AwgEditorPanel(ttk.Frame):
     """Formulas for the 4 AWG channels, a live preview and Save as .npz.
 
@@ -286,11 +297,17 @@ class AwgEditorPanel(ttk.Frame):
             theme.caption(frame, "t_start").grid(row=r, column=2, padx=(0, 4))
             start = ttk.Entry(frame, textvariable=vars_.start, width=8, font=theme.mono(10))
             start.grid(row=r, column=3)
-            Tooltip(start, "Start of the segment (ms); empty: where the previous segment stops")
+            Tooltip(start, "Start of the segment (ms), not before the end of the previous one; "
+                           "empty: where the previous segment stops")
+            vars_.start_entry = start
+            for event in ("<FocusOut>", "<Return>", "<KP_Enter>"):
+                start.bind(event, lambda _e, c=channel, n=r: self._keep_order(c, n), add="+")
             theme.caption(frame, "t_stop").grid(row=r, column=4, padx=(8, 4))
             stop = ttk.Entry(frame, textvariable=vars_.stop, width=8, font=theme.mono(10))
             stop.grid(row=r, column=5)
             Tooltip(stop, "End of the segment (ms); empty: where the next segment starts, or the end")
+            for event in ("<FocusOut>", "<Return>", "<KP_Enter>"):
+                stop.bind(event, lambda _e, c=channel, n=r + 1: self._keep_order(c, n), add="+")
             theme.caption(frame, "ms").grid(row=r, column=6, padx=(4, 6))
             remove = ttk.Button(frame, text="✕", style="Small.TButton", width=3,
                                 command=lambda c=channel, n=r: self._remove_segment(c, n))
@@ -312,6 +329,26 @@ class AwgEditorPanel(ttk.Frame):
         segments.append(Segment("", segments[-1].stop_ms.strip(), ""))
         self._set_segments(channel, segments)
         self._entries_of(self._channel_frames[channel])[-1].focus_set()
+
+    def _keep_order(self, channel: int, index: int) -> None:
+        """Segment index of a channel may not start before the previous one ends (its t_stop,
+        or its t_start when t_stop is empty): an earlier t_start is moved to that time and
+        its field flashes red."""
+        rows = self._segments[channel]
+        if not 0 < index < len(rows):
+            return
+        previous, row = rows[index - 1], rows[index]
+        end = _ms(previous.stop.get())
+        if end is None:
+            end = _ms(previous.start.get())
+        start = _ms(row.start.get())
+        if end is None or start is None or start >= end:
+            return
+        row.start.set(f"{end:g}")
+        entry = getattr(row, "start_entry", None)
+        if entry is not None and entry.winfo_exists():
+            entry.config(style="Error.TEntry")
+            self.after(ORDER_FLASH_MS, lambda: entry.winfo_exists() and entry.config(style="TEntry"))
 
     def _remove_segment(self, channel: int, index: int) -> None:
         segments = [v.segment() for v in self._segments[channel]]
