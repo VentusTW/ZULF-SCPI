@@ -218,11 +218,11 @@ class ThreeDView(ttk.Frame):
                                command=self.draw)
         full.pack(side="left")
         Tooltip(full, "Draw every point even when the plot then turns slowly")
-        for var in (self._first, self._last, self._points):
-            var.trace_add("write", lambda *_: self._typed())
-        for var in (self._channel, self._style, self._colours):
-            var.trace_add("write", lambda *_: self.draw())
-        self._mode.trace_add("write", lambda *_: self._mode_changed())
+        self._field_traces = [(var, var.trace_add("write", lambda *_: self._typed()))
+                        for var in (self._first, self._last, self._points)]
+        self._field_traces += [(var, var.trace_add("write", lambda *_: self.draw()))
+                         for var in (self._channel, self._style, self._colours)]
+        self._field_traces.append((self._mode, self._mode.trace_add("write", lambda *_: self._mode_changed())))
 
         plot = theme.card(self, padding=8)
         plot.pack(side="top", fill="both", expand=True, pady=(10, 0))
@@ -305,6 +305,18 @@ class ThreeDView(ttk.Frame):
         state = ["!disabled"] if self._ax3d() is not None else ["disabled"]
         for button in self._turn_buttons:
             button.state(state)
+
+    def destroy(self) -> None:
+        """Remove the traces of the fields first: they belong to the main window's Tcl
+        interpreter and would keep this tab, with its figure and data, in memory."""
+        for var, name in self._field_traces:
+            try:
+                var.trace_remove("write", name)
+            except tk.TclError:
+                pass
+        self._field_traces = []
+        self._figure.clear()
+        super().destroy()
 
     def restyle(self) -> None:
         self.draw()
