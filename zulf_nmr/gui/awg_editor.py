@@ -516,13 +516,16 @@ def _same_waveform(a: AwgWaveform, b: AwgWaveform | None) -> bool:
             and a.source_path == b.source_path and np.array_equal(a.currents_A, b.currents_A))
 
 
+def _is_segment_row(row) -> bool:
+    """A saved segment: [formula, t_start, t_stop], all text."""
+    return isinstance(row, list) and len(row) == 3 and all(isinstance(v, str) for v in row)
+
+
 def _saved_segments(saved: dict) -> list[list[Segment]]:
     """The segments typed last time; the formulas of older settings become one segment each."""
     segments = saved.get("segments")
     if (isinstance(segments, list) and len(segments) == N_CHANNELS
-            and all(isinstance(ch, list) and ch and all(isinstance(x, list) and len(x) == 3
-                                                         and all(isinstance(v, str) for v in x) for x in ch)
-                    for ch in segments)):
+            and all(isinstance(ch, list) and ch and all(_is_segment_row(x) for x in ch) for ch in segments)):
         return [[Segment(*x) for x in ch] for ch in segments]
     formulas = saved.get("formulas")
     if not (isinstance(formulas, list) and len(formulas) == N_CHANNELS and all(isinstance(f, str) for f in formulas)):

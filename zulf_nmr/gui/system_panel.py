@@ -76,7 +76,8 @@ class SystemPanel(ttk.Frame):
         row.pack(side="top", fill="x", pady=1)
         ttk.Label(row, text=key, style="Card.TLabel", foreground=theme.MUTED, font=theme.mono(9),
                   width=30).pack(side="left")
-        ttk.Label(row, text=value, style="Card.TLabel", foreground=colour or theme.TEXT, font=theme.mono(9)).pack(side="left")
+        ttk.Label(row, text=value, style="Card.TLabel", foreground=colour or theme.TEXT,
+                  font=theme.mono(9)).pack(side="left")
 
     @staticmethod
     def _clear(frame: ttk.Frame) -> None:

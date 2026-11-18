@@ -198,7 +198,8 @@ def parse_experiment(
 
     name = v.string(data, "experiment_name", "")
     if name and (_FORBIDDEN_NAME_CHARS & set(name)):
-        v.error("experiment_name", f"must not contain any of {''.join(sorted(_FORBIDDEN_NAME_CHARS))} (used in file names)")
+        forbidden = "".join(sorted(_FORBIDDEN_NAME_CHARS))
+        v.error("experiment_name", f"must not contain any of {forbidden} (used in file names)")
 
     metadata = v.section(data, "metadata")
 
@@ -374,7 +375,8 @@ class _Validator:
     def _join(parent: str, key: str) -> str:
         return f"{parent}.{key}" if parent else key
 
-    def check_keys(self, d: dict, where: str, required: set[str] = frozenset(), optional: set[str] = frozenset()) -> None:
+    def check_keys(self, d: dict, where: str, required: set[str] = frozenset(),
+                   optional: set[str] = frozenset()) -> None:
         for key in sorted(required - d.keys()):
             self.error(self._join(where, key), "missing")
         for key in sorted(d.keys() - required - optional):

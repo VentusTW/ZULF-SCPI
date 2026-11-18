@@ -276,8 +276,8 @@ class App(tk.Tk):
         side = tk.Frame(self, background=theme.SURFACE, width=_SIDEBAR_PX)
         side.pack_propagate(False)
         tk.Frame(side, width=1, background=theme.BORDER).pack(side="right", fill="y")
-        theme.caption(side, "Instrument consoles", style="Surface.TLabel").pack(side="top", anchor="w",
-                                                                              padx=16, pady=(16, 8))
+        theme.caption(side, "Instrument consoles", style="Surface.TLabel").pack(
+            side="top", anchor="w", padx=16, pady=(16, 8))
         self._nav: dict[str, NavItem] = {}
         for number, (name, text, icon) in enumerate(PANELS, start=1):
             item = NavItem(side, text, icon, f"Ctrl+{number}", command=lambda n=name: self.show_panel(n))

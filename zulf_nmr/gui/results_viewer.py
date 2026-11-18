@@ -92,9 +92,9 @@ class TraceRow:
     a transient is received. The toolbar above the plots zooms (to a rectangle), pans,
     goes back, saves and turns on two measuring cursors - on both plots; Home shows
     everything again. Ctrl + wheel zooms either plot, Shift + wheel moves it along its
-    axis; a zoomed spectrum stays zoomed while its range or data change. Drag on the time plot to choose the range of the spectrum;
-    drag the selection to move it; a click (left, without dragging, or right) removes it -
-    the spectrum is then of the whole trace. The header names the trace; its +/- button
+    axis; a zoomed spectrum stays zoomed while its range or data change. Drag on the time
+    plot to choose the range of the spectrum; drag the selection to move it; a click (left,
+    without dragging, or right) removes it - the spectrum is then of the whole trace. The header names the trace; its +/- button
     hides or shows the plots.
     """
 
@@ -676,7 +676,8 @@ class EdgeDialog(tk.Toplevel):
         t0, t1 = (value, t1) if self._edge == 0 else (t0, value)
         if t1 <= t0:
             other = "end" if self._edge == 0 else "start"
-            return self._fail(f"Must be {'before' if self._edge == 0 else 'after'} the {other} ({self._extents[1 - self._edge]:.6g} s)")
+            side = "before" if self._edge == 0 else "after"
+            return self._fail(f"Must be {side} the {other} ({self._extents[1 - self._edge]:.6g} s)")
         self.destroy()
         self._on_apply(t0, t1)
 

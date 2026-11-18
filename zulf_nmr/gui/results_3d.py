@@ -82,9 +82,12 @@ class RoundButton(tk.Canvas):
 
     def recolor(self, _mapping: dict[str, str]) -> None:
         """Draw the circles again in the current theme's colours."""
-        self._images = {state: _circle_image(fill, border, self._arrow, symbol) for state, fill, border, symbol in (
-            ("normal", theme.RAISED, theme.BORDER, theme.TEXT), ("hover", theme.RAISED_HOVER, theme.ACCENT, theme.ACCENT),
-            ("pressed", theme.SELECTION, theme.ACCENT, theme.ACCENT), ("disabled", theme.SURFACE, theme.BORDER, theme.DIM))}
+        looks = (("normal", theme.RAISED, theme.BORDER, theme.TEXT),
+                 ("hover", theme.RAISED_HOVER, theme.ACCENT, theme.ACCENT),
+                 ("pressed", theme.SELECTION, theme.ACCENT, theme.ACCENT),
+                 ("disabled", theme.SURFACE, theme.BORDER, theme.DIM))
+        self._images = {state: _circle_image(fill, border, self._arrow, symbol)
+                        for state, fill, border, symbol in looks}
         self.config(background=theme.PANEL)
         self._paint()
 
@@ -219,9 +222,9 @@ class ThreeDView(ttk.Frame):
         full.pack(side="left")
         Tooltip(full, "Draw every point even when the plot then turns slowly")
         self._field_traces = [(var, var.trace_add("write", lambda *_: self._typed()))
-                        for var in (self._first, self._last, self._points)]
+                              for var in (self._first, self._last, self._points)]
         self._field_traces += [(var, var.trace_add("write", lambda *_: self.draw()))
-                         for var in (self._channel, self._style, self._colours)]
+                               for var in (self._channel, self._style, self._colours)]
         self._field_traces.append((self._mode, self._mode.trace_add("write", lambda *_: self._mode_changed())))
 
         plot = theme.card(self, padding=8)

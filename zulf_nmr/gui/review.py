@@ -305,4 +305,3 @@ class ReviewPanel(ttk.Frame):
         for canvas in self._canvases:
             canvas.draw_idle()
         self._page.to_top()
-
