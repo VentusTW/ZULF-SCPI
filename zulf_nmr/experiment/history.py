@@ -14,7 +14,7 @@ from zulf_nmr.experiment.schedule import QueueResult, ResultGroup, Transient
 from zulf_nmr.experiment.sequence import acquisition_window_ms
 
 _FILE = re.compile(r"^(?P<stamp>\d{8}_\d{6})_(?P<name>.+?)_"
-                   r"(?:transient_(?P<number>\d{3})|(?P<kind>average|config|awg))\.(?P<ext>\w+)$")
+                   r"(?:transient_(?P<number>\d{3,})|(?P<kind>average|config|awg))\.(?P<ext>\w+)$")
 _CHANNEL = re.compile(r"^ch(\d+)$")
 
 
@@ -71,12 +71,18 @@ def _load_group(index: int, name: str, entry: dict, warnings: list[str]) -> Resu
     channels: tuple[int, ...] | None = None
     rate = None
     for number, path in sorted(entry["transients"].items()):
-        data, file_channels, file_rate = _read_csv(path)
+        try:
+            data, file_channels, file_rate = _read_csv(path)
+        except (OSError, ValueError) as e:
+            warnings.append(f"{path.name}: {english_error(e)} - skipped")
+            continue
         if channels is not None and file_channels != channels:
             warnings.append(f"{path.name}: channels {file_channels} differ from {channels} - skipped")
             continue
         channels, rate = file_channels, rate or file_rate
         transients.append(Transient(number, index, path, data))
+    if not transients:
+        raise ValueError("no transient file could be read")
 
     expected = len(transients)
     start_s = 0.0
@@ -96,8 +102,12 @@ def _load_group(index: int, name: str, entry: dict, warnings: list[str]) -> Resu
     average_file = entry.get("average")
     average = None
     if average_file is not None:
-        average, avg_channels, _ = _read_csv(average_file)
-        if avg_channels != channels:
+        try:
+            average, avg_channels, _ = _read_csv(average_file)
+        except (OSError, ValueError) as e:
+            warnings.append(f"{average_file.name}: {english_error(e)} - recomputed")
+            average, avg_channels = None, channels
+        if average is not None and avg_channels != channels:
             warnings.append(f"{average_file.name}: channels differ from the transients - recomputed")
             average = None
     if average is None:

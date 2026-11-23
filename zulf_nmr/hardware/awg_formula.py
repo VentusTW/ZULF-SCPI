@@ -135,6 +135,7 @@ class SourceData:
         values[inside] = self.currents_mA[index[inside], int(n) - 1]
         return values
 
+
 _ALLOWED_NODES = (
     ast.Expression, ast.BinOp, ast.UnaryOp, ast.Compare, ast.Call, ast.Name, ast.Load, ast.Constant,
     ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow, ast.Mod, ast.FloorDiv, ast.USub, ast.UAdd,
@@ -144,6 +145,20 @@ _ALLOWED_NODES = (
 
 class FormulaError(ValueError):
     pass
+
+
+class _FloatNumbers(ast.NodeTransformer):
+    """Every whole number of a formula as a float, so that a power like 2**10**7 overflows
+    at once instead of being computed exactly, with millions of digits, for minutes."""
+
+    def visit_Constant(self, node: ast.Constant) -> ast.Constant:
+        if isinstance(node.value, int):
+            try:
+                value = float(node.value)
+            except OverflowError:
+                raise FormulaError("a number in the formula is too large") from None
+            return ast.copy_location(ast.Constant(value), node)
+        return node
 
 
 def check_formula(text: str) -> ast.Expression:
@@ -180,7 +195,7 @@ def check_formula(text: str) -> ast.Expression:
             expected = ARITY.get(node.func.id, 1)
             if len(node.args) != expected:
                 raise FormulaError(f"{node.func.id}() takes {expected} argument(s), got {len(node.args)}")
-    return tree
+    return ast.fix_missing_locations(_FloatNumbers().visit(tree))
 
 
 def evaluate_formula(text: str, t: np.ndarray, source: SourceData | None = None,
@@ -197,7 +212,9 @@ def evaluate_formula(text: str, t: np.ndarray, source: SourceData | None = None,
             raise FormulaError("data() needs a file - open one with Open...")
         return source.channel(n, t)
 
-    names = {"t": t, "tau": t if tau is None else tau, **CONSTANTS, **MATH, "root": lambda x, n: root(x, n, t), **_shapes(t if tau is None else tau), "data": data}
+    segment_time = t if tau is None else tau
+    names = {"t": t, "tau": segment_time, **CONSTANTS, **MATH, "root": lambda x, n: root(x, n, t),
+             **_shapes(segment_time), "data": data}
     try:
         with np.errstate(all="ignore"):
             value = eval(compile(tree, "<formula>", "eval"), {"__builtins__": {}}, names)
@@ -206,6 +223,8 @@ def evaluate_formula(text: str, t: np.ndarray, source: SourceData | None = None,
         raise
     except TypeError as e:
         raise FormulaError(f"wrong arguments: {e}") from None
+    except OverflowError:
+        raise FormulaError("a number in the formula is too large") from None
     except Exception as e:
         raise FormulaError(str(e)) from None
     if not np.isfinite(value).all():

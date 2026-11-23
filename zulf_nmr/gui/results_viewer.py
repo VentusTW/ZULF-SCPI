@@ -67,6 +67,24 @@ class RowToolbar(NavigationToolbar2Tk):
         super().zoom(*args)
 
 
+class _SpanSelector(SpanSelector):
+    """A SpanSelector whose blit background is freed by free(). Matplotlib's own one
+    frees it from a weakref finalizer that holds the canvas, so a closed plot (its figure,
+    its toolbar and the data of the whole row) would stay in memory for good."""
+
+    def _save_blit_background(self, background) -> None:
+        if self._blit_background_id is None:
+            self._blit_background_id = self.canvas._get_blit_background_id()
+        self.canvas._blit_backgrounds[self._blit_background_id] = background
+
+    def free(self) -> None:
+        """Stop listening to the canvas and free the blit background."""
+        self.disconnect_events()
+        if self._blit_background_id is not None:
+            self.canvas._release_blit_background_id(self._blit_background_id)
+            self._blit_background_id = None
+
+
 class TraceRow:
     """One trace: all channels in time (left) and the spectrum of the selected range (right).
 
@@ -74,9 +92,9 @@ class TraceRow:
     a transient is received. The toolbar above the plots zooms (to a rectangle), pans,
     goes back, saves and turns on two measuring cursors - on both plots; Home shows
     everything again. Ctrl + wheel zooms either plot, Shift + wheel moves it along its
-    axis; a zoomed spectrum stays zoomed while its range or data change. Drag on the time plot to choose the range of the spectrum;
-    drag the selection to move it; a click (left, without dragging, or right) removes it -
-    the spectrum is then of the whole trace. The header names the trace; its +/- button
+    axis; a zoomed spectrum stays zoomed while its range or data change. Drag on the time
+    plot to choose the range of the spectrum; drag the selection to move it; a click (left,
+    without dragging, or right) removes it - the spectrum is then of the whole trace. The header names the trace; its +/- button
     hides or shows the plots.
     """
 
@@ -143,7 +161,7 @@ class TraceRow:
         self.toolbar.bind("<MouseWheel>", lambda e: self.on_scroll and self.on_scroll(e.delta / 120))
         self._layout()
 
-        self.selector: SpanSelector | None = None
+        self.selector: _SpanSelector | None = None
         self._new_selector()
         self.canvas.mpl_connect("resize_event", lambda _e: self._layout())
         self.canvas.mpl_connect("scroll_event", self._on_scroll)
@@ -163,7 +181,7 @@ class TraceRow:
         """Free the figure of a closed row; the data, the zoom and the cursors stay."""
         if self.figure is None:
             return
-        self.selector.disconnect_events()
+        self.selector.free()
         self.figure.clear()
         self.toolbar.destroy()
         self.widget.destroy()
@@ -296,9 +314,9 @@ class TraceRow:
     def _new_selector(self) -> None:
         """A fresh SpanSelector showing t_range, with no drag in progress."""
         if self.selector is not None:
-            self.selector.disconnect_events()
+            self.selector.free()
             self.selector.set_visible(False)
-        self.selector = SpanSelector(
+        self.selector = _SpanSelector(
             self.ax_time, self._on_select, "horizontal", useblit=True, interactive=True,
             drag_from_anywhere=True, button=1, grab_range=EDGE_GRAB_PX,
             props=dict(facecolor=theme.SPAN, alpha=0.25),
@@ -658,7 +676,8 @@ class EdgeDialog(tk.Toplevel):
         t0, t1 = (value, t1) if self._edge == 0 else (t0, value)
         if t1 <= t0:
             other = "end" if self._edge == 0 else "start"
-            return self._fail(f"Must be {'before' if self._edge == 0 else 'after'} the {other} ({self._extents[1 - self._edge]:.6g} s)")
+            side = "before" if self._edge == 0 else "after"
+            return self._fail(f"Must be {side} the {other} ({self._extents[1 - self._edge]:.6g} s)")
         self.destroy()
         self._on_apply(t0, t1)
 

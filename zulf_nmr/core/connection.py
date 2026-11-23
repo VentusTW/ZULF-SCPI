@@ -36,6 +36,7 @@ class SCPIConnection:
 
     TERMINATOR = b"\n"
     _READ_POLL_S = 0.05
+    MAX_TEXT_BYTES = 1 << 16
 
     def __init__(
         self,
@@ -236,6 +237,9 @@ class SCPIConnection:
                 continue
             end = buf.find(self.TERMINATOR)
             if end < 0:
+                if len(buf) > self.MAX_TEXT_BYTES:
+                    log.warning("Discarding %d bytes without a line end from the device", len(buf))
+                    buf.clear()
                 break
             messages.append(buf[:end].decode("ascii", errors="replace").rstrip("\r"))
             del buf[: end + 1]

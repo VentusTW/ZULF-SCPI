@@ -1,7 +1,11 @@
-"""Experimental 3D view of the single transients of one set, like MATLAB's mesh and surf:
-the transients are joined into one 3D grid - time (or frequency) on the x axis, the
-transient number on the y axis and the value as the height, coloured by the height.
-The arrows beside the plot turn it, as does dragging it."""
+"""Experimental 3D view of the single transients of one set: every transient is its own
+trace, set at its own depth - time (or frequency) on the x axis, the transient number in
+depth, the value as the height - drawn as lines or as a waterfall of filled traces, one
+colour per transient. The traces are not joined into one surface. The arrows beside the
+plot turn it; the mouse wheel, + and - zoom it (turning with the mouse is off for now).
+Dragging the numbers of the x axis cuts out a part of it, as on the 2D plots: to the right
+narrows the range, to the left widens it, around the value where the drag started; the
+part is then drawn again in full detail."""
 
 from __future__ import annotations
 
@@ -10,12 +14,16 @@ from tkinter import ttk
 from typing import Callable
 
 import numpy as np
+import math
+
 from matplotlib import colormaps
+from matplotlib.backend_tools import Cursors
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
 from matplotlib.cm import ScalarMappable
 from matplotlib.colors import Normalize
 from matplotlib.figure import Figure
 from matplotlib.ticker import MaxNLocator
+from matplotlib.collections import PolyCollection
 from mpl_toolkits.mplot3d.art3d import Line3DCollection
 from PIL import Image, ImageDraw, ImageTk
 
@@ -25,31 +33,19 @@ from zulf_nmr.gui.tooltip import Tooltip
 from zulf_nmr.utils.visualization import plot_style
 from zulf_nmr.utils.visualization.results_plotter import spectrum
 
-MAX_CELLS = 150_000
 MAX_LINE_POINTS = 600_000
+MAX_WATERFALL_POINTS = 150_000
 MODES = ("Signal", "Spectrum")
-STYLES = ("Mesh", "Surface", "Lines")
+STYLES = ("Lines", "Waterfall")
 COLOUR_MAPS = ("jet", "turbo", "viridis", "plasma")
 TURN_STEP_DEG = 25.0
-START_VIEW = (30.0, -37.5)
+START_VIEW = (20.0, -60.0)
+ZOOM_STEP = 1.2
+ZOOM_LIMITS = (0.5, 5.0)
+X_NUMBERS_BAND_PX = 26
+X_PIXELS_PER_E = 160.0
 ROUND_BUTTON_PX = 30
 ROUND_BUTTON_OVERSAMPLE = 4
-
-
-def binned(x: np.ndarray, y: np.ndarray, points: int, peak: bool) -> tuple[np.ndarray, np.ndarray]:
-    """At most `points` points: the mean of every bin, or its highest value (peak=True, so
-    the peaks of a spectrum are kept)."""
-    n = len(x)
-    if n <= points:
-        return x, y
-    starts = np.linspace(0, n, points, endpoint=False).astype(int)
-    counts = np.diff(np.append(starts, n))
-    if peak:
-        values = np.maximum.reduceat(y, starts)
-    else:
-        values = np.add.reduceat(y, starts) / counts
-    centres = np.add.reduceat(x, starts) / counts
-    return centres, values
 
 
 def envelope(x: np.ndarray, y: np.ndarray, points: int) -> tuple[np.ndarray, np.ndarray]:
@@ -65,14 +61,15 @@ def envelope(x: np.ndarray, y: np.ndarray, points: int) -> tuple[np.ndarray, np.
 
 class RoundButton(tk.Canvas):
     """A round button drawn smooth (antialiased) in the theme's colours, with an arrow
-    (text "up", "down", "left" or "right") or a text symbol; state() and instate() as on
+    (text "up", "down", "left" or "right"), a plus or minus sign ("plus", "minus") or a text
+    symbol; state() and instate() as on
     a ttk button, for "disabled"."""
 
     def __init__(self, parent: tk.Misc, text: str, command: Callable[[], None]) -> None:
         size = ROUND_BUTTON_PX
         super().__init__(parent, width=size, height=size, highlightthickness=0, borderwidth=0, cursor="hand2")
         self._command = command
-        self._arrow = text if text in ARROWS else None
+        self._arrow = text if text in ARROWS or text in SIGNS else None
         self._disabled = self._hover = self._pressed = False
         self._images: dict[str, ImageTk.PhotoImage] = {}
         self._circle = self.create_image(size // 2, size // 2)
@@ -85,9 +82,12 @@ class RoundButton(tk.Canvas):
 
     def recolor(self, _mapping: dict[str, str]) -> None:
         """Draw the circles again in the current theme's colours."""
-        self._images = {state: _circle_image(fill, border, self._arrow, symbol) for state, fill, border, symbol in (
-            ("normal", theme.RAISED, theme.BORDER, theme.TEXT), ("hover", theme.RAISED_HOVER, theme.ACCENT, theme.ACCENT),
-            ("pressed", theme.SELECTION, theme.ACCENT, theme.ACCENT), ("disabled", theme.SURFACE, theme.BORDER, theme.DIM))}
+        looks = (("normal", theme.RAISED, theme.BORDER, theme.TEXT),
+                 ("hover", theme.RAISED_HOVER, theme.ACCENT, theme.ACCENT),
+                 ("pressed", theme.SELECTION, theme.ACCENT, theme.ACCENT),
+                 ("disabled", theme.SURFACE, theme.BORDER, theme.DIM))
+        self._images = {state: _circle_image(fill, border, self._arrow, symbol)
+                        for state, fill, border, symbol in looks}
         self.config(background=theme.PANEL)
         self._paint()
 
@@ -128,6 +128,7 @@ class RoundButton(tk.Canvas):
 
 ARROWS = {"up": ((-1.0, 0.5), (0.0, -0.5), (1.0, 0.5)), "down": ((-1.0, -0.5), (0.0, 0.5), (1.0, -0.5)),
           "left": ((0.5, -1.0), (-0.5, 0.0), (0.5, 1.0)), "right": ((-0.5, -1.0), (0.5, 0.0), (-0.5, 1.0))}
+SIGNS = {"plus": (((-1.0, 0.0), (1.0, 0.0)), ((0.0, -1.0), (0.0, 1.0))), "minus": (((-1.0, 0.0), (1.0, 0.0)),)}
 ARROW_RADIUS = 0.2
 ARROW_STROKE_PX = 2.2
 
@@ -142,10 +143,11 @@ def _circle_image(fill: str, border: str, arrow: str | None, symbol: str) -> Ima
     if arrow:
         centre, radius = big / 2, big * ARROW_RADIUS
         stroke = round(ARROW_STROKE_PX * ROUND_BUTTON_OVERSAMPLE)
-        points = [(centre + radius * dx, centre + radius * dy) for dx, dy in ARROWS[arrow]]
-        draw.line(points, fill=symbol, width=stroke, joint="curve")
-        for x, y in (points[0], points[-1]):
-            draw.ellipse((x - stroke / 2, y - stroke / 2, x + stroke / 2, y + stroke / 2), fill=symbol)
+        for shape in SIGNS.get(arrow, (ARROWS.get(arrow),)):
+            points = [(centre + radius * dx, centre + radius * dy) for dx, dy in shape]
+            draw.line(points, fill=symbol, width=stroke, joint="curve")
+            for x, y in (points[0], points[-1]):
+                draw.ellipse((x - stroke / 2, y - stroke / 2, x + stroke / 2, y + stroke / 2), fill=symbol)
     return ImageTk.PhotoImage(image.resize((ROUND_BUTTON_PX, ROUND_BUTTON_PX), Image.LANCZOS))
 
 
@@ -155,8 +157,9 @@ class ThreeDView(ttk.Frame):
 
     "Transients" (from - to, by number) and "Points" follow the data (all transients of
     the set, all samples or frequencies in the range) until the user types a number;
-    "Auto" makes them follow again. One transient is drawn as an ordinary 2D plot. A grid too big to turn smoothly (more than MAX_CELLS cells) is drawn with
-    fewer points, as the line above the plot says, unless "Full resolution" is ticked."""
+    "Auto" makes them follow again. One transient is drawn as an ordinary 2D plot. More
+    points than turn smoothly (MAX_LINE_POINTS, MAX_WATERFALL_POINTS) are drawn with fewer
+    points, as the line above the plot says, unless "Full resolution" is ticked."""
 
     def __init__(self, parent: tk.Misc, transients: Callable[[], list[tuple[int, np.ndarray]]],
                  sample_rate_hz: float, channels: tuple[int, ...], start_s: float, title: str) -> None:
@@ -178,6 +181,7 @@ class ThreeDView(ttk.Frame):
         self._auto = True
         self._filling = False
         self._view = START_VIEW
+        self._zoom = 1.0
 
         bar = theme.card(self, padding=10)
         bar.pack(side="top", fill="x")
@@ -212,16 +216,16 @@ class ThreeDView(ttk.Frame):
         self._of_points.pack(side="left", padx=(0, 8))
         auto = ttk.Button(controls, text="Auto", style="Small.TButton", command=self._set_auto)
         auto.pack(side="left", padx=(0, 12))
-        Tooltip(auto, "All transients of the set and all points in the range")
+        Tooltip(auto, "The whole range, all transients of the set and all points")
         full = ttk.Checkbutton(controls, text="Full resolution", variable=self._full, style="Card.TCheckbutton",
                                command=self.draw)
         full.pack(side="left")
         Tooltip(full, "Draw every point even when the plot then turns slowly")
-        for var in (self._first, self._last, self._points):
-            var.trace_add("write", lambda *_: self._typed())
-        for var in (self._channel, self._style, self._colours):
-            var.trace_add("write", lambda *_: self.draw())
-        self._mode.trace_add("write", lambda *_: self._mode_changed())
+        self._field_traces = [(var, var.trace_add("write", lambda *_: self._typed()))
+                              for var in (self._first, self._last, self._points)]
+        self._field_traces += [(var, var.trace_add("write", lambda *_: self.draw()))
+                               for var in (self._channel, self._style, self._colours)]
+        self._field_traces.append((self._mode, self._mode.trace_add("write", lambda *_: self._mode_changed())))
 
         plot = theme.card(self, padding=8)
         plot.pack(side="top", fill="both", expand=True, pady=(10, 0))
@@ -229,7 +233,14 @@ class ThreeDView(ttk.Frame):
         self._info.pack(side="top", anchor="w")
         self._figure = Figure(figsize=(10, 7))
         self._canvas = FigureCanvasTkAgg(self._figure, master=plot.body)
+        self._canvas.mpl_connect("scroll_event", self._on_scroll)
+        self._canvas.mpl_connect("button_press_event", self._x_press)
+        self._canvas.mpl_connect("motion_notify_event", self._x_motion)
+        self._canvas.mpl_connect("button_release_event", self._x_release)
+        self._x_drag = None
+        self._x_cursor = False
         toolbar = NavigationToolbar2Tk(self._canvas, plot.body, pack_toolbar=False)
+        self._toolbar = toolbar
         toolbar.update()
         theme.style_toolbar(toolbar)
         toolbar.pack(side="bottom", fill="x")
@@ -251,7 +262,12 @@ class ThreeDView(ttk.Frame):
                                           ("down", 2, 1, (-TURN_STEP_DEG, 0.0), "Turn down")):
             button = RoundButton(cross, text, command=lambda s=step: self.turn(s))
             button.grid(row=row, column=col, padx=2, pady=2)
-            Tooltip(button, f"{tip} ({TURN_STEP_DEG:g}°)" if step else tip)
+            Tooltip(button, f"{tip} ({TURN_STEP_DEG:g}°)" if step else f"{tip} and size")
+            buttons.append(button)
+        for text, col, factor, tip in (("minus", 0, 1 / ZOOM_STEP, "Zoom out"), ("plus", 2, ZOOM_STEP, "Zoom in")):
+            button = RoundButton(cross, text, command=lambda f=factor: self.zoom(f))
+            button.grid(row=3, column=col, padx=2, pady=(10, 2))
+            Tooltip(button, f"{tip} (or the mouse wheel)")
             buttons.append(button)
         return buttons
 
@@ -265,6 +281,8 @@ class ThreeDView(ttk.Frame):
             return
         if step is None:
             elev, azim = START_VIEW
+            self._zoom = 1.0
+            ax.set_box_aspect(None, zoom=self._zoom)
         else:
             elev = max(-90.0, min(90.0, ax.elev + step[0]))
             azim = (ax.azim + step[1] + 180.0) % 360.0 - 180.0
@@ -273,10 +291,35 @@ class ThreeDView(ttk.Frame):
         with busy(self, "Turning the 3D plot…"):
             self._canvas.draw()
 
+    def zoom(self, factor: float) -> None:
+        """Make the 3D plot `factor` times bigger (smaller below 1), within ZOOM_LIMITS."""
+        ax = self._ax3d()
+        if ax is None:
+            return
+        self._zoom = min(max(self._zoom * factor, ZOOM_LIMITS[0]), ZOOM_LIMITS[1])
+        ax.set_box_aspect(None, zoom=self._zoom)
+        self._canvas.draw_idle()
+
+    def _on_scroll(self, event) -> None:
+        if event.inaxes is not None and event.inaxes is self._ax3d():
+            self.zoom(ZOOM_STEP if event.step > 0 else 1 / ZOOM_STEP)
+
     def _update_turn_buttons(self) -> None:
         state = ["!disabled"] if self._ax3d() is not None else ["disabled"]
         for button in self._turn_buttons:
             button.state(state)
+
+    def destroy(self) -> None:
+        """Remove the traces of the fields first: they belong to the main window's Tcl
+        interpreter and would keep this tab, with its figure and data, in memory."""
+        for var, name in self._field_traces:
+            try:
+                var.trace_remove("write", name)
+            except tk.TclError:
+                pass
+        self._field_traces = []
+        self._figure.clear()
+        super().destroy()
 
     def restyle(self) -> None:
         self.draw()
@@ -287,6 +330,97 @@ class ThreeDView(ttk.Frame):
 
     def _set_auto(self) -> None:
         self._auto = True
+        self._from.set("")
+        self._to.set("")
+        self.draw()
+
+    def _x_numbers(self, event) -> tuple[float, tuple[float, float]] | None:
+        """(x value under the mouse, unit direction of the x axis on the screen) when the mouse
+        is over the numbers of the 3D plot's x axis, else None. The numbers' place and slant
+        are taken from the drawn tick labels, so it works however the plot is turned."""
+        ax = self._ax3d()
+        if ax is None or event.x is None or event.y is None or getattr(self._toolbar, "mode", None):
+            return None
+        renderer = self._canvas.get_renderer()
+        low, high = sorted(ax.get_xlim())
+        marks = []
+        for tick in ax.xaxis.get_major_ticks():
+            label = tick.label1
+            if not label.get_visible() or not label.get_text() or not low <= tick.get_loc() <= high:
+                continue
+            box = label.get_window_extent(renderer)
+            marks.append((tick.get_loc(), (box.x0 + box.x1) / 2, (box.y0 + box.y1) / 2))
+        if len(marks) < 2:
+            return None
+        (v0, x0, y0), (v1, x1, y1) = marks[0], marks[-1]
+        dx, dy = x1 - x0, y1 - y0
+        length = math.hypot(dx, dy)
+        if length < 1 or v1 == v0:
+            return None
+        along = ((event.x - x0) * dx + (event.y - y0) * dy) / length ** 2
+        across = abs((event.x - x0) * dy - (event.y - y0) * dx) / length
+        if across > X_NUMBERS_BAND_PX or not -0.15 <= along <= 1.15:
+            return None
+        places = np.array([((x - x0) * dx + (y - y0) * dy) / length ** 2 for _v, x, y in marks])
+        values = np.array([v for v, _x, _y in marks])
+        if along < places[0] or along > places[-1]:
+            end = slice(0, 2) if along < places[0] else slice(-2, None)
+            p, v = places[end], values[end]
+            value = v[0] + (along - p[0]) * (v[1] - v[0]) / (p[1] - p[0])
+        else:
+            value = float(np.interp(along, places, values))
+        return value, (dx / length, dy / length)
+
+    def _x_extent(self) -> tuple[float, float] | None:
+        """The whole x range of the data: the recording, or 0 to half the sample rate."""
+        transients = self._transients()
+        if not transients:
+            return None
+        if self._mode.get() == "Signal":
+            return self._start_s, self._start_s + len(transients[0][1]) / self._rate
+        return 0.0, self._rate / 2
+
+    def _x_press(self, event) -> None:
+        if event.button != 1:
+            return
+        hit = self._x_numbers(event)
+        if hit is None:
+            return
+        anchor, direction = hit
+        self._x_drag = (event.x * direction[0] + event.y * direction[1], direction, self._ax3d().get_xlim(), anchor)
+
+    def _x_motion(self, event) -> None:
+        if self._x_drag is None:
+            over = self._x_numbers(event) is not None
+            if over or self._x_cursor:
+                self._canvas.set_cursor(Cursors.RESIZE_HORIZONTAL if over else Cursors.POINTER)
+                self._x_cursor = over
+            return
+        if event.x is None or event.y is None:
+            return
+        start, (ux, uy), (low, high), anchor = self._x_drag
+        factor = math.exp(-((event.x * ux + event.y * uy) - start) / X_PIXELS_PER_E)
+        new_low, new_high = anchor - (anchor - low) * factor, anchor + (high - anchor) * factor
+        extent = self._x_extent()
+        if extent is not None:
+            new_low, new_high = max(new_low, extent[0]), min(new_high, extent[1])
+        if new_high - new_low <= 0 or not (math.isfinite(new_low) and math.isfinite(new_high)):
+            return
+        self._ax3d().set_xlim(new_low, new_high)
+        self._canvas.draw_idle()
+
+    def _x_release(self, _event) -> None:
+        if self._x_drag is None:
+            return
+        self._x_drag = None
+        ax = self._ax3d()
+        if ax is None:
+            return
+        low, high = ax.get_xlim()
+        extent = self._x_extent()
+        whole = extent is not None and low <= extent[0] and high >= extent[1]
+        self._from.set("" if whole else f"{low:.6g}")
+        self._to.set("" if whole else f"{high:.6g}")
         self.draw()
 
     def _set_fields(self, first: int, last: int, points: int) -> None:
@@ -322,15 +456,13 @@ class ThreeDView(ttk.Frame):
         except ValueError:
             return default
 
-    def _grid(self, chosen: list[tuple[int, np.ndarray]], column: int, points: int, lines: bool | None = None
-              ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        """(x, transient numbers, values of shape (transients, x)) of the chosen transients;
-        with lines (default: the Lines plot) a list of (x, values) per transient instead."""
-        if lines is None:
-            lines = self._style.get() == "Lines"
+    def _traces(self, chosen: list[tuple[int, np.ndarray]], column: int, points: int
+                ) -> list[tuple[np.ndarray, np.ndarray]]:
+        """(x, values) of every chosen transient in the chosen range, at most about `points`
+        points each (the lowest and highest value of every bin, so the shape stays)."""
         signal = self._mode.get() == "Signal"
         low, high = self._number(self._from.get(), None), self._number(self._to.get(), None)
-        rows, x = [], None
+        traces = []
         for _number, data in chosen:
             values = data.reshape(-1, 1) if data.ndim == 1 else data
             if signal:
@@ -344,21 +476,8 @@ class ThreeDView(ttk.Frame):
                 keep &= xs >= low
             if high is not None:
                 keep &= xs <= high
-            xs, ys = xs[keep], ys[keep]
-            if lines:
-                rows.append(envelope(xs, ys, points))
-                continue
-            xs, ys = binned(xs, ys, points, peak=not signal)
-            if x is None:
-                x = xs
-            n = min(len(x), len(ys))
-            x = x[:n]
-            rows = [r[:n] for r in rows]
-            rows.append(ys[:n])
-        numbers = np.array([n for n, _ in chosen], dtype=float)
-        if lines:
-            return np.array([]), numbers, rows
-        return (x if x is not None else np.array([])), numbers, np.array(rows)
+            traces.append(envelope(xs[keep], ys[keep], points))
+        return traces
 
     def draw(self) -> None:
         """Read the transients and draw those in the chosen range: a 3D plot of two or more,
@@ -397,7 +516,7 @@ class ThreeDView(ttk.Frame):
             return self._draw_2d(in_range[0], column, wanted_points)
 
         most, points = len(in_range), wanted_points
-        budget = MAX_LINE_POINTS if style == "Lines" else MAX_CELLS
+        budget = MAX_LINE_POINTS if style == "Lines" else MAX_WATERFALL_POINTS
         reduced = not self._full.get() and most * points > budget
         if reduced:
             points = max(budget // most, min(points, 50))
@@ -407,8 +526,13 @@ class ThreeDView(ttk.Frame):
         chosen = in_range[::step]
         if len(chosen) < 2:
             chosen = [in_range[0], in_range[-1]]
-        x, numbers, values = self._grid(chosen, column, points)
+        traces = [(n, xs, ys) for (n, _), (xs, ys) in zip(chosen, self._traces(chosen, column, points)) if len(xs)]
+        if not traces:
+            return self._message("Nothing in the chosen range.")
+        numbers = np.array([n for n, _, _ in traces], dtype=float)
         ax = figure.add_subplot(projection="3d")
+        ax.disable_mouse_rotation()
+        ax.set_box_aspect(None, zoom=self._zoom)
         ax.set_facecolor(plot_style.PANEL)
         for axis in (ax.xaxis, ax.yaxis, ax.zaxis):
             axis.set_pane_color(plot_style.PLOT_BACKGROUND)
@@ -417,34 +541,23 @@ class ThreeDView(ttk.Frame):
             axis._axinfo["grid"]["linestyle"] = ":"
         cmap = colormaps[self._colours.get() or "jet"]
         signal = self._mode.get() == "Signal"
+        norm = Normalize(numbers.min(), numbers.max())
+        colours = cmap(norm(numbers))
+        all_y = np.concatenate([ys for _, _, ys in traces])
+        z_low, z_high = float(all_y.min()), float(all_y.max())
         if style == "Lines":
-            segments = [np.column_stack([xs, np.full(len(xs), n), ys]) for (xs, ys), n in zip(values, numbers)
-                        if len(xs)]
-            if not segments:
-                return self._message("Nothing in the chosen range.")
-            all_z = np.concatenate([s[:, 2] for s in segments])
-            norm = Normalize(all_z.min(), all_z.max())
-            colours = cmap(norm([s[:, 2].max() for s in segments]))
-            ax.add_collection3d(Line3DCollection(segments, colors=colours, linewidths=0.8))
-            all_x = np.concatenate([s[:, 0] for s in segments])
-            ax.set_xlim(all_x.min(), all_x.max())
-            z_low, z_high = all_z.min(), all_z.max()
+            segments = [np.column_stack([xs, np.full(len(xs), n), ys]) for n, xs, ys in traces]
+            ax.add_collection3d(Line3DCollection(segments, colors=colours, linewidths=0.9), axlim_clip=True)
         else:
-            if values.size == 0 or len(x) < 2:
-                return self._message("Nothing in the chosen range.")
-            grid_x, grid_y = np.meshgrid(x, numbers)
-            norm = Normalize(values.min(), values.max())
-            if style == "Mesh":
-                surface = ax.plot_surface(grid_x, grid_y, values, rstride=1, cstride=1, linewidth=0.7,
-                                          antialiased=True, shade=False)
-                faces = (values[:-1, :-1] + values[1:, :-1] + values[:-1, 1:] + values[1:, 1:]) / 4
-                surface.set_facecolor(plot_style.PLOT_BACKGROUND)
-                surface.set_edgecolor(cmap(norm(faces.ravel())))
-            else:
-                ax.plot_surface(grid_x, grid_y, values, rstride=1, cstride=1, cmap=cmap, norm=norm,
-                                linewidth=0.2, edgecolor=plot_style.GRID, antialiased=True, shade=True)
-            ax.set_xlim(x.min(), x.max())
-            z_low, z_high = values.min(), values.max()
+            base = z_low
+            outlines = [np.column_stack([np.concatenate([[xs[0]], xs, [xs[-1]]]),
+                                         np.concatenate([[base], ys, [base]])]) for _, xs, ys in traces]
+            fills = colours.copy()
+            fills[:, 3] = 0.35
+            ax.add_collection3d(PolyCollection(outlines, facecolors=fills, edgecolors=colours, linewidths=0.8),
+                                zs=numbers, zdir="y", axlim_clip=True)
+        all_x = np.concatenate([xs for _, xs, _ in traces])
+        ax.set_xlim(all_x.min(), all_x.max())
         pad = (z_high - z_low) * 0.05 or 1.0
         ax.set_zlim(z_low - pad, z_high + pad)
         ax.set_ylim(numbers.min(), numbers.max())
@@ -454,11 +567,12 @@ class ThreeDView(ttk.Frame):
         ax.set_zlabel("Signal" if signal else "Amplitude", labelpad=8)
         ax.tick_params(labelsize=7)
         ax.view_init(elev=self._view[0], azim=self._view[1])
-        figure.colorbar(ax.collections[0] if style == "Surface" else _mappable(cmap, norm), ax=ax, shrink=0.55,
-                        pad=0.08).ax.tick_params(labelsize=7)
+        bar = figure.colorbar(_mappable(cmap, norm), ax=ax, shrink=0.55, pad=0.08)
+        bar.set_label("Transient", fontsize=8)
+        bar.ax.tick_params(labelsize=7)
         figure.subplots_adjust(left=0, right=0.95, bottom=0, top=1)
         shown = (f"{first}–{last}" if step == 1 else f"every {step}. of {first}–{last}")
-        drawn_points = len(x) if style != "Lines" else max(len(xs) for xs, _ys in values)
+        drawn_points = max(len(xs) for _, xs, _ in traces)
         note = f" - fewer than the {len(in_range)} x {wanted_points} asked for" if reduced else ""
         self._info.config(text=f"{self._channel.get()} · {len(numbers)} transient(s) ({shown}) x {drawn_points} "
                                f"points{note}",
@@ -470,8 +584,7 @@ class ThreeDView(ttk.Frame):
         """One transient: an ordinary plot of its value against time (or frequency)."""
         number, _data = transient
         signal = self._mode.get() == "Signal"
-        _x, _numbers, rows = self._grid([transient], column, points, lines=True)
-        xs, ys = rows[0]
+        xs, ys = self._traces([transient], column, points)[0]
         if not len(xs):
             return self._message("Nothing in the chosen range.")
         ax = self._figure.add_subplot()

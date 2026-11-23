@@ -127,11 +127,11 @@ class ExperimentRunner:
 
         expected = self.expected_points
         deadline = time.monotonic() + self._max_duration_s()
-        blocks: list[np.ndarray] = []
+        columns = [ch - 1 for ch in self.config.acquisition.channels]
+        samples_so_far = np.empty((expected, len(columns)))
         received = 0
         chunk_index = 0
         done = False
-        columns = [ch - 1 for ch in self.config.acquisition.channels]
         last_data = 0.0
 
         while received < expected:
@@ -146,13 +146,14 @@ class ExperimentRunner:
                 samples = None
             if samples is not None:
                 chunk_index += 1
-                blocks.append(samples)
-                received += len(samples)
+                take = min(len(samples), expected - received)
+                samples_so_far[received:received + take] = samples[:take, columns]
+                received += take
                 if self.on_progress:
                     self.on_progress(index, received, expected)
-                if self.on_data and blocks and time.monotonic() - last_data >= self.data_interval_s:
+                if self.on_data and received and time.monotonic() - last_data >= self.data_interval_s:
                     last_data = time.monotonic()
-                    self.on_data(index, np.concatenate(blocks)[:expected, columns])
+                    self.on_data(index, samples_so_far[:received])
                 continue
             if done:
                 log.warning("Transient %d: sequence done with %d/%d points", index, received, expected)
@@ -161,9 +162,7 @@ class ExperimentRunner:
             if not done:
                 time.sleep(self.poll_s)
 
-        if not blocks:
-            return np.empty((0, len(self.config.acquisition.channels)))
-        return np.concatenate(blocks)[:expected, columns]
+        return samples_so_far[:received]
 
     def _max_duration_s(self) -> float:
         last_event_ms = max((e.time_ms for e in self.config.events), default=0)
